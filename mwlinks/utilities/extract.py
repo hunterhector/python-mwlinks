@@ -66,8 +66,6 @@ def run(dump_files, last_revision):
     for input_file_path in dump_files:
         dump = mwxml.Dump.from_file(mwtypes.files.reader(input_file_path))
 
-        # dump = mwxml.Dump.from_file(open_xml_file(str(input_file_path)))
-
         print("\t".join(('page_id', 'page_title', 'revision_id',
                          'revision_parent_id', 'revision_timestamp',
                          'user_type', 'user_username', 'user_id',
