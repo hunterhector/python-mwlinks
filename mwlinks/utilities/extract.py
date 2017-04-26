@@ -29,27 +29,27 @@ Options:
     -h --help               Prints this documentation
 """
 
-import mw.xml_dump
+# import mw.xml_dump
 import json
 import sys
 import argparse
-import pathlib
 
 import docopt
 import mwxml
+import mwtypes
 
 from typing import IO, Optional, Union
 
-from ..libs import wikilink_extractor
+from mwlinks.libs import wikilink_extractor
 from ..libs.utils import tsv_encode
 
 
-def open_xml_file(path: Union[str, IO]):
-    """Open an xml file, decompressing it if necessary."""
-    f = mw.xml_dump.functions.open_file(
-        mw.xml_dump.functions.file(path)
-    )
-    return f
+# def open_xml_file(path: Union[str, IO]):
+#     """Open an xml file, decompressing it if necessary."""
+#     f = mw.xml_dump.functions.open_file(
+#         mw.xml_dump.functions.file(path)
+#     )
+#     return f
 
 
 def main(argv=None):
@@ -64,8 +64,9 @@ def main(argv=None):
 def run(dump_files, last_revision):
 
     for input_file_path in dump_files:
+        dump = mwxml.Dump.from_file(mwtypes.files.reader(input_file_path))
 
-        dump = mwxml.Dump.from_file(open_xml_file(str(input_file_path)))
+        # dump = mwxml.Dump.from_file(open_xml_file(str(input_file_path)))
 
         print("\t".join(('page_id', 'page_title', 'revision_id',
                          'revision_parent_id', 'revision_timestamp',
