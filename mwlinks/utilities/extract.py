@@ -41,7 +41,7 @@ import mwtypes
 from typing import IO, Optional, Union
 
 from mwlinks.libs import wikilink_extractor
-from ..libs.utils import tsv_encode
+from mwlinks.libs.utils import tsv_encode
 
 
 # def open_xml_file(path: Union[str, IO]):
@@ -53,10 +53,13 @@ from ..libs.utils import tsv_encode
 
 
 def main(argv=None):
+    print(argv)
     args = docopt.docopt(__doc__, argv=argv)
 
     dump_files = args['<dump-file>']
     last_revision = args['--only-last-revision']
+
+    input()
 
     run(dump_files, last_revision)
 
@@ -74,6 +77,10 @@ def run(dump_files, last_revision):
                          'wikilink.section_number')))
 
         for vals in wikilink_extractor.main(dump, last_revision):
+
+            # for val in vals:
+            #     print(val)
+
             print("\t".join(tsv_encode(val) for val in vals))
 
 
