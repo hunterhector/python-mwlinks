@@ -26,6 +26,7 @@ from mwlinks.libs.wikilink import Section
 from mwlinks.libs import utils
 import more_itertools
 from mwlinks.libs import wikilink
+import logging
 
 Revision = NamedTuple('Revision', [
     ('id', int),
@@ -45,12 +46,11 @@ Page = NamedTuple('Page', [
     ('namespace', int),
     ('title', str),
     ('revisions', Iterable[Revision]),
+    ('redirect', str)
 ])
 
 
 def main(argv=None):
-    print(argv)
-
     args = docopt.docopt(__doc__, argv=argv)
 
     dump_files = args['<dump-file>']
@@ -62,7 +62,7 @@ def parse_revision(mw_page: mwxml.Page,
                    only_last_revision: bool) -> Iterator[Revision]:
     revisions = more_itertools.peekable(mw_page)
     for mw_revision in revisions:
-        utils.dot()
+        # utils.dot()
 
         is_last_revision = not utils.has_next(revisions)
         if only_last_revision and not is_last_revision:
@@ -91,11 +91,13 @@ def parse_revision(mw_page: mwxml.Page,
 def parse_page(dump: Iterable[mwxml.Page],
                only_last_revision: bool) -> Iterator[Page]:
     for mw_page in dump:
-        utils.log("Processing", mw_page.title)
+        # utils.log("Processing", mw_page.title)
+        logging.info("Processing %s" % mw_page.title)
 
         # Skip non-articles
         if mw_page.namespace != 0:
-            utils.log('Skipped (namespace != 0)')
+            # utils.log('Skipped (namespace != 0)')
+            logging.info('Skipped (namespace != 0)')
             continue
 
         revisions_generator = parse_revision(
@@ -108,6 +110,7 @@ def parse_page(dump: Iterable[mwxml.Page],
             namespace=mw_page.namespace,
             title=mw_page.title,
             revisions=revisions_generator,
+            redirect=mw_page.redirect
         )
 
 
@@ -142,8 +145,9 @@ def parse(dump: Iterable[mwxml.Page], only_last_revision: bool) -> None:
 
             yield (mw_page.id,
                    mw_page.title,
+                   mw_page.redirect,
                    revision.id,
-                   revision.wikilinks,
+                   list(revision.wikilinks), ## convert the generator to list for easy parallelization.
                    revision.text,
                    )
 

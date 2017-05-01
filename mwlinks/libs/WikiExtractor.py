@@ -186,6 +186,10 @@ options = SimpleNamespace(
     # Minimum expanded text length required to print document
     min_text_length=0,
 
+    ##
+    # Keep new lines
+    keep_new_lines=True,
+
     # Shared objects holding templates, redirects and cache
     templates={},
     redirects={},
@@ -535,7 +539,11 @@ class Extractor(object):
         self.id = id
         self.revid = revid
         self.title = title
-        self.text = ''.join(lines)
+        if options.keep_new_lines:
+            self.text = '\n'.join(lines)
+        else:
+            self.text = ' '.join(lines)
+
         self.magicWords = MagicWords()
         self.frame = Frame()
         self.recursion_exceeded_1_errs = 0  # template recursion within expand()
@@ -577,6 +585,9 @@ class Extractor(object):
                 out.write(header)
 
             for line in text:
+                if line.strip() == "":
+                    continue
+
                 if out == sys.stdout:  # option -a or -o -
                     line = line.encode('utf-8')
                 out.write(line)

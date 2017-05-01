@@ -22,12 +22,17 @@ import docopt
 import mwxml
 import mwtypes
 import os
+
+import sys
+
 from mwlinks.libs import page_parser
 from mwlinks.libs.wikilink import Wikilink
 from mwlinks.libs.common import Span
 import json
 import logging
 from mwlinks.libs.WikiExtractor import Extractor
+from multiprocessing import Pool, Value, Lock, Queue
+from io import StringIO
 
 
 class SurfaceLinkMap:
@@ -64,8 +69,66 @@ class SurfaceLinkMap:
         return self.__surface_indices
 
 
+def parse(lock, out_strings, anchor_replace_map, sl, item, do_link_prob):
+    # sys.stdout.write("\r[%s] Searched %d articles." % (datetime.datetime.now().time(), context_counter.value))
+    wiki_id, title, redirect, revision_id, wiki_links, text = item
+
+    if redirect:
+        return
+
+    # for name, _ in outputs.items():
+    #     out_strings[name] = StringIO()
+
+    for name, out in out_strings.items():
+        if name == "origin":
+            clean_wiki_text(wiki_links, wiki_id, revision_id, title, text, out, use_plain_text=True,
+                            freebase_map=anchor_replace_map)
+            # file_out.write(out_strings[name])
+
+        if name == "replaced":
+            clean_wiki_text(wiki_links, wiki_id, revision_id, title, text, out, use_link=True,
+                            freebase_map=anchor_replace_map)
+            # file_out.write(out_strings[name])
+
+        if name == "both":
+            clean_wiki_text(wiki_links, wiki_id, revision_id, title, text, out, True, True,
+                            freebase_map=anchor_replace_map)
+            # file_out.write(out_strings[name])
+
+    if do_link_prob:
+        with lock:
+            # Currently do not calculate the link probability for the surface terms.
+            accumulate_link_prob(sl, wiki_links)
+
+
+def process(q: Queue, v: Value, lock: Lock, outputs, anchor_replace_map, sl, link_prob):
+    while True:
+        item = q.get()
+        if item is None:
+            break
+
+        out_strings = {}
+
+        for name, _ in outputs.items():
+            out_strings[name] = StringIO()
+
+        parse(lock, out_strings, anchor_replace_map, sl, item, link_prob)
+
+        with lock:
+            v.value += 1
+            # print("processing", item)
+            sys.stdout.write("\rProcessed %d documents." % v.value)
+            sys.stdout.flush()
+
+            for name, out in outputs.items():
+                out.write(out_strings[name].getvalue())
+
+
 def parse_dump(dump_file, output_path, anchor_replace_map={}, write_text=False, write_anchor_text=False,
-               write_both=False, link_prob=False):
+               write_both=False, link_prob=False, num_cpu=5):
+    logging.info("Starting dump parsing.")
+    print("Start parsing the dump.")
+
     dump = mwxml.Dump.from_file(mwtypes.files.reader(dump_file))
 
     outputs = {}
@@ -76,25 +139,27 @@ def parse_dump(dump_file, output_path, anchor_replace_map={}, write_text=False, 
         outputs["replaced"] = open(os.path.join(output_path, "replaced.txt"), 'w')
     if write_both:
         outputs["both"] = open(os.path.join(output_path, "both.txt"), 'w')
+
+    sl = SurfaceLinkMap()
+
+    v = Value('i', 0)
+    lock = Lock()
+    q = Queue(maxsize=num_cpu)
+    p = Pool(num_cpu, initializer=process, initargs=(q, v, lock, outputs, anchor_replace_map, sl, link_prob))
+
+    for element in page_parser.parse(dump, True):
+        q.put(element)
+
+    p.close()
+    p.join()
+
+    print("")
+
     if link_prob:
-        outputs["prob"] = os.io.open(os.path.join(output_path, "prob.json"), encoding='UTF-8', mode='w')
+        out = os.io.open(os.path.join(output_path, "prob.json"), encoding='UTF-8', mode='w')
+        write_as_json(sl, out)
 
-    for wiki_id, title, revision_id, wiki_links, text in page_parser.parse(dump, True):
-        for name, out in outputs.items():
-            if name == "origin":
-                write_wiki_text(wiki_links, wiki_id, revision_id, title, text, out, use_plain_text=True,
-                                freebase_map=anchor_replace_map)
-            if name == "replaced":
-                write_wiki_text(wiki_links, wiki_id, revision_id, title, text, out, use_link=True,
-                                freebase_map=anchor_replace_map)
-            if name == "both":
-                write_wiki_text(wiki_links, wiki_id, revision_id, title, text, out, True, True,
-                                freebase_map=anchor_replace_map)
-
-        if link_prob:
-            # Currently do not calculate the link probability for the surface terms.
-            surface_link_map = calculate_link_prob(title, wiki_links)
-            write_as_json(surface_link_map, outputs["prob"])
+    logging.info("All done.")
 
 
 def div_or_nan(numerator, divisor):
@@ -135,29 +200,22 @@ def write_as_json(surface_link_map, f):
         f.write(u"\n")
 
         count += 1
-        print("\rWrote %d surfaces." % count)
+        sys.stdout.write("\rWrote %d surfaces." % count)
     print("")
 
 
-def calculate_link_prob(title, wikilinks: Iterable[Tuple[Wikilink, Span]]):
-    sl = SurfaceLinkMap()
-
+def accumulate_link_prob(sl: SurfaceLinkMap, wikilinks: Iterable[Tuple[Wikilink, Span]]):
     for link, span in wikilinks:
         anchor = link.anchor
         target = link.link
         sl.add_surface_link(anchor, target)
 
-    return sl
-
 
 def write_cleaned_text(id, revid, title, text, out):
-    lines = text.split("\n")
-    print("Number of lines %d." % len(lines))
     Extractor(id, revid, title, text.split("\n")).extract(out)
-    input()
 
 
-def write_wiki_text(wikilinks, pageid, revid, title, text, out, use_plain_text=False, use_link=False, freebase_map={}):
+def clean_wiki_text(wikilinks, pageid, revid, title, text, out, use_plain_text=False, use_link=False, freebase_map={}):
     if use_plain_text:
         write_cleaned_text(pageid, revid, title, format_anchor(wikilinks, text), out)
     if use_link:
@@ -201,7 +259,11 @@ def main():
 
     output_path = args['--output-path']
 
-    logging.basicConfig(format='%(asctime)s %(levelname)s %(message)s', level=logging.INFO)
+    # logging.basicConfig(format='%(asctime)s %(levelname)s %(message)s', level=logging.INFO)
+    handler = logging.FileHandler('dump.log')
+    handler.setLevel(logging.INFO)
+    handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s %(message)s'))
+    logging.getLogger().addHandler(handler)
 
     parse_dump(dump_file, output_path, write_text=write_text, write_anchor_text=write_anchor_text,
-               write_both=write_both, link_prob=link_prob)
+               write_both=write_both, link_prob=link_prob, num_cpu=8)
