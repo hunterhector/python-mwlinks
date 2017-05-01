@@ -53,11 +53,12 @@ from mwlinks.libs.utils import tsv_encode
 
 
 def main(argv=None):
-    print(argv)
     args = docopt.docopt(__doc__, argv=argv)
 
     dump_files = args['<dump-file>']
     last_revision = args['--only-last-revision']
+
+    print(last_revision)
 
     input()
 

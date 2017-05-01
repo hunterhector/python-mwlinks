@@ -140,29 +140,36 @@ def parse(dump: Iterable[mwxml.Page], only_last_revision: bool) -> None:
             else:
                 revision_minor = 0
 
-            for wikilink, span in revision.wikilinks:
-                # project,page.id,page.title,revision.id,revision.parent_id,
-                # revision.timestamp,contributor_if_exists(revision.user),
-                # revision.minor,wikilink.link,wikilink.anchor,
-                # wikilink.section_name,wikilink.section_level,
-                # wikilink.section_number
-                yield (mw_page.id,
-                       mw_page.title,
-                       revision.id,
-                       revision.parent_id,
-                       revision.timestamp,
-                       user_type,
-                       user_username,
-                       user_id,
-                       revision_minor,
-                       wikilink.link,
-                       wikilink.anchor,
-                       wikilink.section_name,
-                       wikilink.section_level,
-                       wikilink.section_number,
-                       span,
-                       revision.text
-                       )
+            yield (mw_page.id,
+                   mw_page.title,
+                   revision.id,
+                   revision.wikilinks,
+                   revision.text,
+                   )
+
+            # for wikilink, span in revision.wikilinks:
+            #     # project,page.id,page.title,revision.id,revision.parent_id,
+            #     # revision.timestamp,contributor_if_exists(revision.user),
+            #     # revision.minor,wikilink.link,wikilink.anchor,
+            #     # wikilink.section_name,wikilink.section_level,
+            #     # wikilink.section_number
+            #     yield (mw_page.id,
+            #            mw_page.title,
+            #            revision.id,
+            #            revision.parent_id,
+            #            revision.timestamp,
+            #            user_type,
+            #            user_username,
+            #            user_id,
+            #            revision_minor,
+            #            wikilink.link,
+            #            wikilink.anchor,
+            #            wikilink.section_name,
+            #            wikilink.section_level,
+            #            wikilink.section_number,
+            #            span,
+            #            revision.text
+            #            )
 
 
 def run(dump_files):
