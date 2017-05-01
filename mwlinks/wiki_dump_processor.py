@@ -239,7 +239,10 @@ def format_anchor(wikilinks: Iterable[Tuple[Wikilink, Span]], text, freebase_map
 
 
 def get_freebase_id(freebase_map, wiki_title):
-    return freebase_map[wiki_title.replace(" ", "_")]
+    try:
+        return freebase_map[wiki_title.replace(" ", "_")]
+    except KeyError:
+        return None
 
 
 def replace_by_index(text, begin, end, replacement):
