@@ -11,12 +11,14 @@ Options:
     --write-both            Write both text
     --output-path=OUTPUT    Output directory
     --link-prob             Calculate link probability
+    --freebase-map=FB_MAP   Freebase mapping file
+    --redirect-path=REDIRECTS   Redirect file
     <dump-file>             Path to a set of XML dumps files
                             (pages meta history)
     -h --help               Prints this documentation
 """
 from operator import itemgetter
-from typing import Iterable, Tuple
+from typing import Iterable, Tuple, Dict, Set
 
 import docopt
 import mwxml
@@ -31,8 +33,9 @@ from mwlinks.libs.common import Span
 import json
 import logging
 from mwlinks.libs.WikiExtractor import Extractor
-from multiprocessing import Pool, Value, Lock, Queue
+from multiprocessing import Pool, Value, Lock, Queue, Manager
 from io import StringIO
+import datetime
 
 
 class SurfaceLinkMap:
@@ -69,62 +72,65 @@ class SurfaceLinkMap:
         return self.__surface_indices
 
 
-def parse(lock, out_strings, anchor_replace_map, sl, item, do_link_prob):
-    # sys.stdout.write("\r[%s] Searched %d articles." % (datetime.datetime.now().time(), context_counter.value))
+def parse(lock, out_files, failed_pages, redirects, freebase_map, sl, item, do_link_prob):
     wiki_id, title, redirect, revision_id, wiki_links, text = item
 
     if redirect:
         return
 
-    # for name, _ in outputs.items():
-    #     out_strings[name] = StringIO()
-
-    for name, out in out_strings.items():
-        if name == "origin":
+    for key, out_file in out_files.items():
+        out = StringIO()
+        if key == "origin":
             clean_wiki_text(wiki_links, wiki_id, revision_id, title, text, out, use_plain_text=True,
-                            freebase_map=anchor_replace_map)
-            # file_out.write(out_strings[name])
+                            freebase_map=freebase_map)
+            out_file.write(out.getvalue())
 
-        if name == "replaced":
+        if key == "replaced":
             clean_wiki_text(wiki_links, wiki_id, revision_id, title, text, out, use_link=True,
-                            freebase_map=anchor_replace_map)
-            # file_out.write(out_strings[name])
+                            freebase_map=freebase_map)
+            out_file.write(out.getvalue())
 
-        if name == "both":
+        if key == "both":
             clean_wiki_text(wiki_links, wiki_id, revision_id, title, text, out, True, True,
-                            freebase_map=anchor_replace_map)
-            # file_out.write(out_strings[name])
+                            freebase_map=freebase_map)
+            both_text = out.getvalue()
+            out_file.write(mix_up(both_text))
 
     if do_link_prob:
         with lock:
             # Currently do not calculate the link probability for the surface terms.
-            accumulate_link_prob(sl, wiki_links)
+            accumulate_link_prob(sl, wiki_links, redirects, freebase_map, failed_pages)
 
 
-def process(q: Queue, v: Value, lock: Lock, outputs, anchor_replace_map, sl, link_prob):
+def mix_up(text):
+    lines = text.strip().split("\n")
+    middle = len(lines) // 2
+
+    first_half = lines[:middle]
+    second_half = lines[middle:]
+
+    mixed_text = []
+    for f, s in zip(first_half, second_half):
+        mixed_text.append(f)
+        mixed_text.append(s)
+    return "\n".join(mixed_text) + "\n"
+
+
+def process(q: Queue, v: Value, lock: Lock, outputs, redirects, anchor_replace_map, sl, link_prob, failed_pages):
     while True:
         item = q.get()
         if item is None:
             break
 
-        out_strings = {}
-
-        for name, _ in outputs.items():
-            out_strings[name] = StringIO()
-
-        parse(lock, out_strings, anchor_replace_map, sl, item, link_prob)
+        parse(lock, outputs, failed_pages, redirects, anchor_replace_map, sl, item, link_prob)
 
         with lock:
             v.value += 1
-            # print("processing", item)
-            sys.stdout.write("\rProcessed %d documents." % v.value)
+            sys.stdout.write("\r[%s] Processed %d documents." % (datetime.datetime.now().time(), v.value))
             sys.stdout.flush()
 
-            for name, out in outputs.items():
-                out.write(out_strings[name].getvalue())
 
-
-def parse_dump(dump_file, output_path, anchor_replace_map={}, write_text=False, write_anchor_text=False,
+def parse_dump(dump_file, output_path, redirects={}, wiki_2_fb={}, write_text=False, write_anchor_text=False,
                write_both=False, link_prob=False, num_cpu=5):
     logging.info("Starting dump parsing.")
     print("Start parsing the dump.")
@@ -145,21 +151,37 @@ def parse_dump(dump_file, output_path, anchor_replace_map={}, write_text=False, 
     v = Value('i', 0)
     lock = Lock()
     q = Queue(maxsize=num_cpu)
-    p = Pool(num_cpu, initializer=process, initargs=(q, v, lock, outputs, anchor_replace_map, sl, link_prob))
+    failed_pages = Manager().dict()
+    p = Pool(num_cpu, initializer=process,
+             initargs=(q, v, lock, outputs, redirects, wiki_2_fb, sl, link_prob, failed_pages))
 
+    count = 100
     for element in page_parser.parse(dump, True):
         q.put(element)
+        count -= 1
+        if count == 0:
+            break
 
+    print("\nParsing done.")
     p.close()
-    p.join()
+
+    for key, out in outputs.items():
+        out.close()
+
+    out_wiki_not_found = open(os.path.join(output_path, "wiki_not_found.txt"), encoding='UTF-8', mode='w')
+    for p, _ in failed_pages.items():
+        print(p)
+        out_wiki_not_found.write(p)
+        out_wiki_not_found.write("\n")
+    out_wiki_not_found.close()
 
     print("")
 
     if link_prob:
-        out = os.io.open(os.path.join(output_path, "prob.json"), encoding='UTF-8', mode='w')
+        out = open(os.path.join(output_path, "prob.json"), encoding='UTF-8', mode='w')
         write_as_json(sl, out)
 
-    logging.info("All done.")
+    print("All done.")
 
 
 def div_or_nan(numerator, divisor):
@@ -204,11 +226,21 @@ def write_as_json(surface_link_map, f):
     print("")
 
 
-def accumulate_link_prob(sl: SurfaceLinkMap, wikilinks: Iterable[Tuple[Wikilink, Span]]):
+def accumulate_link_prob(sl: SurfaceLinkMap, wikilinks: Iterable[Tuple[Wikilink, Span]],
+                         redirects: Dict, freebase_map: Dict, failed_pages):
     for link, span in wikilinks:
         anchor = link.anchor
         target = link.link
-        sl.add_surface_link(anchor, target)
+
+        fb_id = get_freebase_id(freebase_map, target)
+
+        if fb_id:
+            sl.add_surface_link(anchor, fb_id)
+        else:
+            # print("Accumulation failed " + target)
+            failed_pages[target] = '0'
+
+            # print("%d pages failed " %len(failed_pages))
 
 
 def write_cleaned_text(id, revid, title, text, out):
@@ -238,9 +270,14 @@ def format_anchor(wikilinks: Iterable[Tuple[Wikilink, Span]], text, freebase_map
     return text
 
 
-def get_freebase_id(freebase_map, wiki_title):
+def get_freebase_id(freebase_map: Dict, redirects, wiki_title):
+    key = wiki_title.replace(" ", "_")
+
+    if key in redirects:
+        key = redirects[key]
+
     try:
-        return freebase_map[wiki_title.replace(" ", "_")]
+        return freebase_map[key]
     except KeyError:
         return None
 
@@ -249,6 +286,16 @@ def replace_by_index(text, begin, end, replacement):
     # print("replacing " + text[begin:end] + " by " + replacement)
     # input()
     return text[:begin] + replacement + text[end:]
+
+
+def read_wiki_fb_mapping(mapping_file):
+    wiki_2_fb = {}
+    with open(os.path.join(mapping_file)) as mapping:
+        for line in mapping:
+            fb_id, wikipage_name = line.strip().split("\t")[0:2]
+            formatted_wiki_name = wikipage_name.replace(" ", "_")
+            wiki_2_fb[formatted_wiki_name] = fb_id
+    return wiki_2_fb
 
 
 def main():
@@ -260,13 +307,27 @@ def main():
     write_both = args['--write-both']
     link_prob = args['--link-prob']
 
+    free_base_mapping = args['--freebase-map']
     output_path = args['--output-path']
+    redirect_path = args['--redirect-path']
+
+    sys.path.append("../../projects/KnowledgeIR")
+    from linker.data import data_utils
+
+    logging.info("Loading redirect pages.")
+    redirects = data_utils.run_or_load(os.path.join(output_path, "redirects.pickle"), data_utils.load_redirects,
+                                       redirect_path)
+    logging.info("Done")
+
+    print("Loading Wikipedia to Freebase.")
+    wiki_2_fb = read_wiki_fb_mapping(free_base_mapping)
+    print("Done.")
 
     # logging.basicConfig(format='%(asctime)s %(levelname)s %(message)s', level=logging.INFO)
-    handler = logging.FileHandler('dump.log')
-    handler.setLevel(logging.INFO)
-    handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s %(message)s'))
-    logging.getLogger().addHandler(handler)
+    # handler = logging.FileHandler('dump.log')
+    # handler.setLevel(logging.INFO)
+    # handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s %(message)s'))
+    # logging.getLogger().addHandler(handler)
 
     parse_dump(dump_file, output_path, write_text=write_text, write_anchor_text=write_anchor_text,
-               write_both=write_both, link_prob=link_prob, num_cpu=8)
+               write_both=write_both, link_prob=link_prob, num_cpu=8, wiki_2_fb=wiki_2_fb, redirects=redirects)
