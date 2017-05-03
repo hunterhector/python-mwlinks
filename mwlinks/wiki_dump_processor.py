@@ -74,40 +74,52 @@ class SurfaceLinkMap:
         return self.__surface_indices
 
 
-def parse(lock, out_files, failed_pages, redirects, freebase_map, sl, item, do_link_prob):
+def parse(lock, out_files, gotchas, misses, redirects, freebase_map, sl, item, do_link_prob):
     wiki_id, title, redirect, revision_id, wiki_links, text = item
 
-    # TODO: process the links first before.
+    links = process_links(wiki_links, freebase_map, redirects, gotchas, misses)
 
-    if redirect:
-        return
+    sorted_links = sorted(links, key=itemgetter(2))
 
     for key, out_file in out_files.items():
         out = StringIO()
         if key == "origin":
-            clean_wiki_text(wiki_links, wiki_id, revision_id, title, text, out, use_plain_text=True,
-                            freebase_map=freebase_map, redirects=redirects)
+            clean_wiki_text(sorted_links, wiki_id, revision_id, title, text, out, use_plain_text=True)
             out_file.write(out.getvalue())
 
         if key == "replaced":
-            clean_wiki_text(wiki_links, wiki_id, revision_id, title, text, out, use_link=True,
-                            freebase_map=freebase_map, redirects=redirects)
+            clean_wiki_text(sorted_links, wiki_id, revision_id, title, text, out, use_link=True)
             out_file.write(out.getvalue())
 
         if key == "both":
-            clean_wiki_text(wiki_links, wiki_id, revision_id, title, text, out, True, True,
-                            freebase_map=freebase_map, redirects=redirects)
+            clean_wiki_text(sorted_links, wiki_id, revision_id, title, text, out, True, True)
             both_text = out.getvalue()
             out_file.write(mix_up(both_text))
 
     if do_link_prob:
         with lock:
             # Currently do not calculate the link probability for the surface terms.
-            accumulate_link_prob(sl, wiki_links, redirects, freebase_map, failed_pages)
+            accumulate_link_prob(sl, links)
 
 
-def process_links():
-    pass
+def process_links(wikilinks: Iterable[Tuple[Wikilink, Span]], freebase_map, redirects, gotchas, misses):
+    links = []
+    for link, span in wikilinks:
+        if not is_ignore_link(link):
+            wiki_title = get_wiki_title(link.link)
+            if wiki_title in redirects:
+                wiki_title = redirects[wiki_title]
+
+            if wiki_title in freebase_map:
+                links.append((link.anchor, freebase_map[wiki_title], span))
+                gotchas[wiki_title] = 0
+            else:
+                misses[wiki_title] = 0
+                print("Link %s not found, converted as %s." % (link.link, wiki_title))
+                input()
+
+    return links
+
 
 def mix_up(text):
     lines = text.strip().split("\n")
@@ -123,13 +135,14 @@ def mix_up(text):
     return "\n".join(mixed_text) + "\n"
 
 
-def process(q: Queue, v: Value, lock: Lock, outputs, redirects, anchor_replace_map, sl, link_prob, failed_pages):
+def process(q: Queue, v: Value, lock: Lock, outputs, redirects, anchor_replace_map, sl, link_prob, found_pages,
+            failed_pages):
     while True:
         item = q.get()
         if item is None:
             break
 
-        parse(lock, outputs, failed_pages, redirects, anchor_replace_map, sl, item, link_prob)
+        parse(lock, outputs, found_pages, failed_pages, redirects, anchor_replace_map, sl, item, link_prob)
 
         with lock:
             v.value += 1
@@ -159,8 +172,9 @@ def parse_dump(dump_file, output_path, redirects={}, wiki_2_fb={}, write_text=Fa
     lock = Lock()
     q = Queue(maxsize=num_cpu)
     failed_pages = Manager().dict()
+    found_pages = Manager().dict()
     p = Pool(num_cpu, initializer=process,
-             initargs=(q, v, lock, outputs, redirects, wiki_2_fb, sl, link_prob, failed_pages))
+             initargs=(q, v, lock, outputs, redirects, wiki_2_fb, sl, link_prob, found_pages, failed_pages))
 
     count = 100
     for element in page_parser.parse(dump, True):
@@ -176,13 +190,14 @@ def parse_dump(dump_file, output_path, redirects={}, wiki_2_fb={}, write_text=Fa
         out.close()
 
     out_wiki_not_found = open(os.path.join(output_path, "wiki_not_found.txt"), encoding='UTF-8', mode='w')
+    out_wiki_not_found.write("%d links found, %d links missed.\n" % (len(found_pages), len(failed_pages)))
+    out_wiki_not_found.write("================================\n")
     for p, _ in failed_pages.items():
-        print(p)
         out_wiki_not_found.write(p)
         out_wiki_not_found.write("\n")
     out_wiki_not_found.close()
 
-    print("")
+    print("%d links found, %d links missed." % (len(found_pages), len(failed_pages)))
 
     if link_prob:
         out = open(os.path.join(output_path, "prob.json"), encoding='UTF-8', mode='w')
@@ -233,47 +248,28 @@ def write_as_json(surface_link_map, f):
     print("")
 
 
-def accumulate_link_prob(sl: SurfaceLinkMap, wikilinks: Iterable[Tuple[Wikilink, Span]],
-                         redirects: Dict, freebase_map: Dict, failed_pages):
-    for link, span in wikilinks:
-        anchor = link.anchor
-        target = link.link
-
-        fb_id = get_freebase_id(freebase_map, redirects, target)
-
-        if fb_id:
-            sl.add_surface_link(anchor, fb_id)
-        else:
-            # print("Accumulation failed " + target)
-            failed_pages[target] = '0'
-
-            # print("%d pages failed " %len(failed_pages))
+def accumulate_link_prob(sl: SurfaceLinkMap, links):
+    for anchor, fb_id, span in links:
+        sl.add_surface_link(anchor, fb_id)
 
 
 def write_cleaned_text(id, revid, title, text, out):
     Extractor(id, revid, title, text.split("\n")).extract(out)
 
 
-def clean_wiki_text(wikilinks, pageid, revid, title, text, out, use_plain_text=False, use_link=False, redirects={},
-                    freebase_map={}):
+def clean_wiki_text(links, pageid, revid, title, text, out, use_plain_text=False, use_link=False):
     if use_plain_text:
-        write_cleaned_text(pageid, revid, title, format_anchor(wikilinks, text, redirects), out)
+        write_cleaned_text(pageid, revid, title, format_anchor(links, text), out)
     if use_link:
-        write_cleaned_text(pageid, revid, title, format_anchor(wikilinks, text, redirects, freebase_map), out)
+        write_cleaned_text(pageid, revid, title, format_anchor(links, text, True), out)
 
 
-def format_anchor(wikilinks: Iterable[Tuple[Wikilink, Span]], text, redirects: Dict, freebase_map=None):
-    sorted_links = sorted(wikilinks, key=itemgetter(1))
-
-    for link, span in reversed(sorted_links):
-        if freebase_map:
-            fb_id = get_freebase_id(freebase_map, redirects, link.link)
-            if fb_id:
-                text = replace_by_index(text, span.begin, span.end, fb_id)
-            else:
-                text = replace_by_index(text, span.begin, span.end, link.link)
+def format_anchor(links, text, use_freebase=False):
+    for anchor, fb_id, span in reversed(links):
+        if use_freebase:
+            text = replace_by_index(text, span.begin, span.end, fb_id)
         else:
-            text = replace_by_index(text, span.begin, span.end, link.anchor)
+            text = replace_by_index(text, span.begin, span.end, anchor)
 
     return text
 
@@ -288,18 +284,6 @@ def is_ignore_link(link: Wikilink):
     return False
 
 
-def get_freebase_id(freebase_map: Dict, redirects, link):
-    wiki_title = get_wiki_title(link)
-
-    if wiki_title in redirects:
-        wiki_title = redirects[wiki_title]
-
-    try:
-        return freebase_map[wiki_title]
-    except KeyError:
-        return None
-
-
 def get_wiki_title(link):
     """
     Normalize the link name of the link, such as replacing space, and first letter capitalization. 
@@ -307,7 +291,11 @@ def get_wiki_title(link):
     :param link: 
     :return: 
     """
-    return link.replace(" ", "_").title()
+    return cap_first(link.replace(" ", "_"))
+
+
+def cap_first(s):
+    return s[:1].upper() + s[1:]
 
 
 def replace_by_index(text, begin, end, replacement):
