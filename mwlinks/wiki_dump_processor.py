@@ -37,6 +37,8 @@ from multiprocessing import Pool, Value, Lock, Queue, Manager
 from io import StringIO
 import datetime
 
+links_to_ignore = {"File", "Category"}
+
 
 class SurfaceLinkMap:
     def __init__(self):
@@ -75,6 +77,8 @@ class SurfaceLinkMap:
 def parse(lock, out_files, failed_pages, redirects, freebase_map, sl, item, do_link_prob):
     wiki_id, title, redirect, revision_id, wiki_links, text = item
 
+    # TODO: process the links first before.
+
     if redirect:
         return
 
@@ -82,17 +86,17 @@ def parse(lock, out_files, failed_pages, redirects, freebase_map, sl, item, do_l
         out = StringIO()
         if key == "origin":
             clean_wiki_text(wiki_links, wiki_id, revision_id, title, text, out, use_plain_text=True,
-                            freebase_map=freebase_map)
+                            freebase_map=freebase_map, redirects=redirects)
             out_file.write(out.getvalue())
 
         if key == "replaced":
             clean_wiki_text(wiki_links, wiki_id, revision_id, title, text, out, use_link=True,
-                            freebase_map=freebase_map)
+                            freebase_map=freebase_map, redirects=redirects)
             out_file.write(out.getvalue())
 
         if key == "both":
             clean_wiki_text(wiki_links, wiki_id, revision_id, title, text, out, True, True,
-                            freebase_map=freebase_map)
+                            freebase_map=freebase_map, redirects=redirects)
             both_text = out.getvalue()
             out_file.write(mix_up(both_text))
 
@@ -101,6 +105,9 @@ def parse(lock, out_files, failed_pages, redirects, freebase_map, sl, item, do_l
             # Currently do not calculate the link probability for the surface terms.
             accumulate_link_prob(sl, wiki_links, redirects, freebase_map, failed_pages)
 
+
+def process_links():
+    pass
 
 def mix_up(text):
     lines = text.strip().split("\n")
@@ -232,7 +239,7 @@ def accumulate_link_prob(sl: SurfaceLinkMap, wikilinks: Iterable[Tuple[Wikilink,
         anchor = link.anchor
         target = link.link
 
-        fb_id = get_freebase_id(freebase_map, target)
+        fb_id = get_freebase_id(freebase_map, redirects, target)
 
         if fb_id:
             sl.add_surface_link(anchor, fb_id)
@@ -247,19 +254,20 @@ def write_cleaned_text(id, revid, title, text, out):
     Extractor(id, revid, title, text.split("\n")).extract(out)
 
 
-def clean_wiki_text(wikilinks, pageid, revid, title, text, out, use_plain_text=False, use_link=False, freebase_map={}):
+def clean_wiki_text(wikilinks, pageid, revid, title, text, out, use_plain_text=False, use_link=False, redirects={},
+                    freebase_map={}):
     if use_plain_text:
-        write_cleaned_text(pageid, revid, title, format_anchor(wikilinks, text), out)
+        write_cleaned_text(pageid, revid, title, format_anchor(wikilinks, text, redirects), out)
     if use_link:
-        write_cleaned_text(pageid, revid, title, format_anchor(wikilinks, text, freebase_map), out)
+        write_cleaned_text(pageid, revid, title, format_anchor(wikilinks, text, redirects, freebase_map), out)
 
 
-def format_anchor(wikilinks: Iterable[Tuple[Wikilink, Span]], text, freebase_map=None):
+def format_anchor(wikilinks: Iterable[Tuple[Wikilink, Span]], text, redirects: Dict, freebase_map=None):
     sorted_links = sorted(wikilinks, key=itemgetter(1))
 
     for link, span in reversed(sorted_links):
         if freebase_map:
-            fb_id = get_freebase_id(freebase_map, link.link)
+            fb_id = get_freebase_id(freebase_map, redirects, link.link)
             if fb_id:
                 text = replace_by_index(text, span.begin, span.end, fb_id)
             else:
@@ -270,16 +278,36 @@ def format_anchor(wikilinks: Iterable[Tuple[Wikilink, Span]], text, freebase_map
     return text
 
 
-def get_freebase_id(freebase_map: Dict, redirects, wiki_title):
-    key = wiki_title.replace(" ", "_")
+def is_ignore_link(link: Wikilink):
+    link_parts = link.link.split(":")
+    if len(link_parts) > 1:
+        link_type = link_parts[0]
+        if link_type in links_to_ignore:
+            return True
 
-    if key in redirects:
-        key = redirects[key]
+    return False
+
+
+def get_freebase_id(freebase_map: Dict, redirects, link):
+    wiki_title = get_wiki_title(link)
+
+    if wiki_title in redirects:
+        wiki_title = redirects[wiki_title]
 
     try:
-        return freebase_map[key]
+        return freebase_map[wiki_title]
     except KeyError:
         return None
+
+
+def get_wiki_title(link):
+    """
+    Normalize the link name of the link, such as replacing space, and first letter capitalization. 
+    See: https://en.wikipedia.org/wiki/Wikipedia:Naming_conventions_(capitalization)#Software_characteristics
+    :param link: 
+    :return: 
+    """
+    return link.replace(" ", "_").title()
 
 
 def replace_by_index(text, begin, end, replacement):
@@ -330,4 +358,4 @@ def main():
     # logging.getLogger().addHandler(handler)
 
     parse_dump(dump_file, output_path, write_text=write_text, write_anchor_text=write_anchor_text,
-               write_both=write_both, link_prob=link_prob, num_cpu=8, wiki_2_fb=wiki_2_fb, redirects=redirects)
+               write_both=write_both, link_prob=link_prob, wiki_2_fb=wiki_2_fb, redirects=redirects, num_cpu=8)
