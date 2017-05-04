@@ -32,6 +32,7 @@ from mwlinks.libs.wikilink import Wikilink
 from mwlinks.libs.common import Span
 import json
 import logging
+import logging.config
 from mwlinks.libs.WikiExtractor import Extractor
 from multiprocessing import Pool, Value, Lock, Queue, Manager
 from io import StringIO
@@ -74,12 +75,8 @@ class SurfaceLinkMap:
         return self.__surface_indices
 
 
-def parse(lock, out_files, gotchas, misses, redirects, freebase_map, sl, item, do_link_prob):
-    wiki_id, title, redirect, revision_id, wiki_links, text = item
-
-    links = process_links(wiki_links, freebase_map, redirects, gotchas, misses)
-
-    sorted_links = sorted(links, key=itemgetter(2))
+def parse(out_files, item):
+    wiki_id, title, redirect, revision_id, sorted_links, text = item
 
     for key, out_file in out_files.items():
         out = StringIO()
@@ -96,11 +93,6 @@ def parse(lock, out_files, gotchas, misses, redirects, freebase_map, sl, item, d
             both_text = out.getvalue()
             out_file.write(mix_up(both_text))
 
-    if do_link_prob:
-        with lock:
-            # Currently do not calculate the link probability for the surface terms.
-            accumulate_link_prob(sl, links)
-
 
 def process_links(wikilinks: Iterable[Tuple[Wikilink, Span]], freebase_map, redirects, gotchas, misses):
     links = []
@@ -115,8 +107,6 @@ def process_links(wikilinks: Iterable[Tuple[Wikilink, Span]], freebase_map, redi
                 gotchas[wiki_title] = 0
             else:
                 misses[wiki_title] = 0
-                print("Link %s not found, converted as %s." % (link.link, wiki_title))
-                input()
 
     return links
 
@@ -135,14 +125,13 @@ def mix_up(text):
     return "\n".join(mixed_text) + "\n"
 
 
-def process(q: Queue, v: Value, lock: Lock, outputs, redirects, anchor_replace_map, sl, link_prob, found_pages,
-            failed_pages):
+def process(q: Queue, v: Value, lock: Lock, outputs):
     while True:
         item = q.get()
         if item is None:
             break
 
-        parse(lock, outputs, found_pages, failed_pages, redirects, anchor_replace_map, sl, item, link_prob)
+        parse(outputs, item)
 
         with lock:
             v.value += 1
@@ -173,15 +162,24 @@ def parse_dump(dump_file, output_path, redirects={}, wiki_2_fb={}, write_text=Fa
     q = Queue(maxsize=num_cpu)
     failed_pages = Manager().dict()
     found_pages = Manager().dict()
-    p = Pool(num_cpu, initializer=process,
-             initargs=(q, v, lock, outputs, redirects, wiki_2_fb, sl, link_prob, found_pages, failed_pages))
 
-    count = 100
-    for element in page_parser.parse(dump, True):
+    p = Pool(num_cpu, initializer=process, initargs=(q, v, lock, outputs))
+
+    # count = 100
+    for wiki_id, title, redirect, revision_id, wiki_links, text in page_parser.parse(dump, True):
+        links = process_links(wiki_links, wiki_2_fb, redirects, found_pages, failed_pages)
+        sorted_links = sorted(links, key=itemgetter(2))
+        element = (wiki_id, title, redirect, revision_id, sorted_links, text)
         q.put(element)
-        count -= 1
-        if count == 0:
-            break
+
+        if link_prob:
+            # Currently do not calculate the link probability for the surface terms.
+            for anchor, fb_id, span in sorted_links:
+                sl.add_surface_link(anchor, fb_id)
+
+                # count -= 1
+                # if count == 0:
+                #     break
 
     print("\nParsing done.")
     p.close()
@@ -200,8 +198,7 @@ def parse_dump(dump_file, output_path, redirects={}, wiki_2_fb={}, write_text=Fa
     print("%d links found, %d links missed." % (len(found_pages), len(failed_pages)))
 
     if link_prob:
-        out = open(os.path.join(output_path, "prob.json"), encoding='UTF-8', mode='w')
-        write_as_json(sl, out)
+        write_as_json(sl, os.path.join(output_path, "prob.json"))
 
     print("All done.")
 
@@ -210,42 +207,48 @@ def div_or_nan(numerator, divisor):
     return float('nan') if divisor == 0 else numerator * 1.0 / divisor
 
 
-def write_as_json(surface_link_map, f):
-    # readme = {"surface": 0,  "targets": 4}
-
+def write_as_json(surface_link_map, out_path):
     surfaces = surface_link_map.get_anchors()
     surface_links = surface_link_map.get_links()
 
     count = 0
 
+    all_surface_info = {}
+
     for index, surface in enumerate(surfaces):
         surface_info = []
 
         links = surface_links[index]
-        # num_appearance = surface_text_count[index]
 
         num_linked = 0
 
-        surface_info.append(surface)
+        # surface_info.append(surface)
         # surface_info.append(num_appearance)
 
-        for link, link_count in links.iteritems():
+        for link, link_count in links.items():
             num_linked += link_count
 
         surface_info.append(num_linked)
         # surface_info.append(div_or_nan(num_linked, num_appearance))
 
         targets = {}
-        for link, link_count in links.iteritems():
+        for link, link_count in links.items():
             targets[link] = (link_count, div_or_nan(link_count, num_linked))
         surface_info.append(targets)
 
-        f.write(json.dumps(surface_info).decode('utf-8'))
-        f.write(u"\n")
+        all_surface_info[surface] = surface_info
 
+        # f.write(json.dumps(surface_info).decode('utf-8'))
+        # f.write(u"\n")
+
+        # out = open(os.path.join(output_path, "prob.json"), encoding='UTF-8', mode='w')
         count += 1
-        sys.stdout.write("\rWrote %d surfaces." % count)
-    print("")
+        sys.stdout.write("\rCollected %d surfaces." % count)
+
+    with open(out_path, 'w') as out:
+        json.dump(all_surface_info, out, indent=4)
+
+    print("\nFinished writing surface information.")
 
 
 def accumulate_link_prob(sl: SurfaceLinkMap, links):
@@ -339,11 +342,12 @@ def main():
     wiki_2_fb = read_wiki_fb_mapping(free_base_mapping)
     print("Done.")
 
-    # logging.basicConfig(format='%(asctime)s %(levelname)s %(message)s', level=logging.INFO)
-    # handler = logging.FileHandler('dump.log')
-    # handler.setLevel(logging.INFO)
-    # handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s %(message)s'))
-    # logging.getLogger().addHandler(handler)
+    root = logging.getLogger()
+    root.setLevel(logging.WARNING)
+    root.handlers = []
+    handler = logging.FileHandler(os.path.join(output_path, "dump.log"))
+    handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s %(message)s'))
+    root.addHandler(handler)
 
     parse_dump(dump_file, output_path, write_text=write_text, write_anchor_text=write_anchor_text,
                write_both=write_both, link_prob=link_prob, wiki_2_fb=wiki_2_fb, redirects=redirects, num_cpu=8)
