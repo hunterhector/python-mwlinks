@@ -37,6 +37,8 @@ from multiprocessing import Pool, Value, Lock, Queue, Manager
 from io import StringIO
 import datetime
 
+import json
+
 
 class SurfaceLinkMap:
     def __init__(self):
@@ -72,7 +74,7 @@ class SurfaceLinkMap:
         return self.__surface_indices
 
 
-def parse(lock, out_files, failed_pages, redirects, freebase_map, sl, item, do_link_prob):
+def write_anchor_replaced(lock, out_files, failed_pages, redirects, freebase_map, sl, item, do_link_prob):
     wiki_id, title, redirect, revision_id, wiki_links, text = item
 
     if redirect:
@@ -81,18 +83,18 @@ def parse(lock, out_files, failed_pages, redirects, freebase_map, sl, item, do_l
     for key, out_file in out_files.items():
         out = StringIO()
         if key == "origin":
-            clean_wiki_text(wiki_links, wiki_id, revision_id, title, text, out, use_plain_text=True,
+            clean_wiki_text(wiki_links, wiki_id, revision_id, title, text, out, redirects, use_plain_text=True,
                             freebase_map=freebase_map)
             out_file.write(out.getvalue())
 
         if key == "replaced":
-            clean_wiki_text(wiki_links, wiki_id, revision_id, title, text, out, use_link=True,
+            clean_wiki_text(wiki_links, wiki_id, revision_id, title, text, out, redirects, use_link=True,
                             freebase_map=freebase_map)
             out_file.write(out.getvalue())
 
         if key == "both":
-            clean_wiki_text(wiki_links, wiki_id, revision_id, title, text, out, True, True,
-                            freebase_map=freebase_map)
+            clean_wiki_text(wiki_links, wiki_id, revision_id, title, text, out, redirects, use_plain_text=True,
+                            use_link=True, freebase_map=freebase_map)
             both_text = out.getvalue()
             out_file.write(mix_up(both_text))
 
@@ -116,13 +118,14 @@ def mix_up(text):
     return "\n".join(mixed_text) + "\n"
 
 
-def process(q: Queue, v: Value, lock: Lock, outputs, redirects, anchor_replace_map, sl, link_prob, failed_pages):
+def process_anchor_replace(q: Queue, v: Value, lock: Lock, outputs, redirects, wiki_2_fb, sl, link_prob,
+                           failed_pages):
     while True:
         item = q.get()
         if item is None:
             break
 
-        parse(lock, outputs, failed_pages, redirects, anchor_replace_map, sl, item, link_prob)
+        write_anchor_replaced(lock, outputs, failed_pages, redirects, wiki_2_fb, sl, item, link_prob)
 
         with lock:
             v.value += 1
@@ -130,10 +133,133 @@ def process(q: Queue, v: Value, lock: Lock, outputs, redirects, anchor_replace_m
             sys.stdout.flush()
 
 
-def parse_dump(dump_file, output_path, redirects={}, wiki_2_fb={}, write_text=False, write_anchor_text=False,
-               write_both=False, link_prob=False, num_cpu=5):
-    logging.info("Starting dump parsing.")
-    print("Start parsing the dump.")
+def write_anchor_spotted(output, freebase_map, redirects, item):
+    wiki_id, title, redirect, revision_id, wiki_links, text = item
+
+    if redirect:
+        return
+
+    out = StringIO()
+
+    extract_cleaned_text(wiki_id, revision_id, title, text, out)
+
+    wiki_text = out.getvalue()
+
+    spotted_data = {}
+    spotted_data['bodyText'] = wiki_text
+    spotted_data['title'] = title
+    spotted_data['spot'] = {}
+    spotted_data['spot']['bodyText'] = find_spots_in_text(wiki_text, title, wiki_links, freebase_map, redirects)
+
+    spotted_data_json = json.dumps(spotted_data)
+
+    output.write(spotted_data_json)
+    output.write("\n")
+
+
+def find_spots_in_text(text, title, anchors, freebase_map, redirects):
+    all_spots = []
+
+    # Find out the title's entity.
+    title_fb_id = get_freebase_id(freebase_map, redirects, title)
+    title_length = len(title.split(" "))
+
+    surface_2_spots = {}
+
+    # Add title entity in the surface search.
+    surface_2_spots[title_length] = {}
+    surface_2_spots[title_length][title] = (title, title_fb_id)
+
+    anchor_lengths = set()
+    anchor_lengths.add(title_length)
+
+    for link, span in anchors:
+        anchor = link.anchor
+        target = link.link
+
+        fb_id = get_freebase_id(freebase_map, redirects, target)
+
+        length = len(anchor.split(" "))
+        anchor_lengths.add(length)
+
+        if length not in surface_2_spots:
+            surface_2_spots[length] = {}
+
+        surface_2_spots[length][anchor] = (target, fb_id)
+
+    tokens = text.split()
+
+    for begin in range(len(tokens)):
+        for l in anchor_lengths:
+            end = begin + l
+
+            spot_map = surface_2_spots[l]
+            if end <= len(tokens):
+                window_tokens = tokens[begin:end]
+                window_text = " ".join(window_tokens)
+
+                if window_text in spot_map:
+                    target, fb_id = spot_map[window_text]
+
+                    spot = {}
+                    spot['loc'] = [begin, end]
+                    spot['surface'] = window_text
+                    spot['entity'] = {'wiki': target, 'freebase': fb_id}
+
+                    all_spots.append(spot)
+
+    return all_spots
+
+
+def process_anchor_spot(q: Queue, v: Value, lock: Lock, output, wiki_2_fb, redirects):
+    while True:
+        item = q.get()
+        if item is None:
+            break
+
+        write_anchor_spotted(output, wiki_2_fb, redirects, item)
+
+        with lock:
+            v.value += 1
+            sys.stdout.write("\r[%s] Processed %d documents." % (datetime.datetime.now().time(), v.value))
+            sys.stdout.flush()
+
+
+def parse_as_spots(dump_file, output_path, redirects, wiki_2_fb={}, num_cpu=5):
+    logging.info("Starting parsing the dump as spots.")
+    print("Start parsing the dump as spots.")
+
+    dump = mwxml.Dump.from_file(mwtypes.files.reader(dump_file))
+
+    output = open(os.path.join(output_path, "wikipedia.json"), 'w')
+
+    sl = SurfaceLinkMap()
+
+    v = Value('i', 0)
+    lock = Lock()
+    q = Queue(maxsize=num_cpu)
+    p = Pool(num_cpu, initializer=process_anchor_spot, initargs=(q, v, lock, output, wiki_2_fb, redirects))
+
+    count = 100
+    for element in page_parser.parse(dump, True):
+        q.put(element)
+        # count -= 1
+        # if count == 0:
+        #     break
+
+    print("\nParsing done.")
+    p.close()
+
+    output.close()
+
+    print("All done.")
+
+
+def parse_as_anchored_text(dump_file, output_path, redirects={}, wiki_2_fb={}, write_text=False,
+                           write_anchor_text=False,
+                           write_both=False, link_prob=False, num_cpu=5):
+    logging.info("Starting parsing the dump into anchored text.")
+    print("Start parsing the dump into anchored text.")
 
     dump = mwxml.Dump.from_file(mwtypes.files.reader(dump_file))
 
@@ -152,7 +278,7 @@ def parse_dump(dump_file, output_path, redirects={}, wiki_2_fb={}, write_text=Fa
     lock = Lock()
     q = Queue(maxsize=num_cpu)
     failed_pages = Manager().dict()
-    p = Pool(num_cpu, initializer=process,
+    p = Pool(num_cpu, initializer=process_anchor_replace,
              initargs=(q, v, lock, outputs, redirects, wiki_2_fb, sl, link_prob, failed_pages))
 
     count = 100
@@ -232,7 +358,7 @@ def accumulate_link_prob(sl: SurfaceLinkMap, wikilinks: Iterable[Tuple[Wikilink,
         anchor = link.anchor
         target = link.link
 
-        fb_id = get_freebase_id(freebase_map, target)
+        fb_id = get_freebase_id(freebase_map, redirects, target)
 
         if fb_id:
             sl.add_surface_link(anchor, fb_id)
@@ -243,23 +369,24 @@ def accumulate_link_prob(sl: SurfaceLinkMap, wikilinks: Iterable[Tuple[Wikilink,
             # print("%d pages failed " %len(failed_pages))
 
 
-def write_cleaned_text(id, revid, title, text, out):
+def clean_wiki_text(wikilinks, pageid, revid, title, text, out, redirects, use_plain_text=False, use_link=False,
+                    freebase_map={}):
+    if use_plain_text:
+        extract_cleaned_text(pageid, revid, title, format_anchor(wikilinks, text, redirects, freebase_map), out)
+    if use_link:
+        extract_cleaned_text(pageid, revid, title, format_anchor(wikilinks, text, redirects, freebase_map), out)
+
+
+def extract_cleaned_text(id, revid, title, text, out):
     Extractor(id, revid, title, text.split("\n")).extract(out)
 
 
-def clean_wiki_text(wikilinks, pageid, revid, title, text, out, use_plain_text=False, use_link=False, freebase_map={}):
-    if use_plain_text:
-        write_cleaned_text(pageid, revid, title, format_anchor(wikilinks, text), out)
-    if use_link:
-        write_cleaned_text(pageid, revid, title, format_anchor(wikilinks, text, freebase_map), out)
-
-
-def format_anchor(wikilinks: Iterable[Tuple[Wikilink, Span]], text, freebase_map=None):
+def format_anchor(wikilinks: Iterable[Tuple[Wikilink, Span]], text, redirects, freebase_map=None):
     sorted_links = sorted(wikilinks, key=itemgetter(1))
 
     for link, span in reversed(sorted_links):
         if freebase_map:
-            fb_id = get_freebase_id(freebase_map, link.link)
+            fb_id = get_freebase_id(freebase_map, redirects, link.link)
             if fb_id:
                 text = replace_by_index(text, span.begin, span.end, fb_id)
             else:
@@ -298,20 +425,10 @@ def read_wiki_fb_mapping(mapping_file):
     return wiki_2_fb
 
 
-def main():
-    args = docopt.docopt(__doc__, argv=None)
-
-    dump_file = args['<dump-file>']
-    write_text = args['--write-text']
-    write_anchor_text = args['--write-anchor']
-    write_both = args['--write-both']
-    link_prob = args['--link-prob']
-
-    free_base_mapping = args['--freebase-map']
+def write_redirects(args):
     output_path = args['--output-path']
     redirect_path = args['--redirect-path']
 
-    sys.path.append("../../projects/KnowledgeIR")
     from linker.data import data_utils
 
     logging.info("Loading redirect pages.")
@@ -319,15 +436,47 @@ def main():
                                        redirect_path)
     logging.info("Done")
 
+    return redirects
+
+
+def load_wiki_freebase(args):
+    free_base_mapping = args['--freebase-map']
+
     print("Loading Wikipedia to Freebase.")
     wiki_2_fb = read_wiki_fb_mapping(free_base_mapping)
     print("Done.")
 
-    # logging.basicConfig(format='%(asctime)s %(levelname)s %(message)s', level=logging.INFO)
-    # handler = logging.FileHandler('dump.log')
-    # handler.setLevel(logging.INFO)
-    # handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s %(message)s'))
-    # logging.getLogger().addHandler(handler)
+    return wiki_2_fb
 
-    parse_dump(dump_file, output_path, write_text=write_text, write_anchor_text=write_anchor_text,
-               write_both=write_both, link_prob=link_prob, num_cpu=8, wiki_2_fb=wiki_2_fb, redirects=redirects)
+
+def main():
+    args = docopt.docopt(__doc__, argv=None)
+    dump_file = args['<dump-file>']
+    output_path = args['--output-path']
+    sys.path.append("../../projects/KnowledgeIR")
+
+    # redirects = write_redirects(args)
+    redirects = {}
+    wiki_2_fb = load_wiki_freebase(args)
+
+    parse_as_spots(dump_file, output_path, redirects, wiki_2_fb=wiki_2_fb, num_cpu=1)
+
+# def main():
+#     args = docopt.docopt(__doc__, argv=None)
+#
+#     dump_file = args['<dump-file>']
+#     write_text = args['--write-text']
+#     write_anchor_text = args['--write-anchor']
+#     write_both = args['--write-both']
+#     link_prob = args['--link-prob']
+#
+#     output_path = args['--output-path']
+#
+#     sys.path.append("../../projects/KnowledgeIR")
+#
+#     redirects = write_redirects(args)
+#     wiki_2_fb = load_wiki_freebase(args)
+#
+#     parse_as_anchored_text(dump_file, output_path, write_text=write_text, write_anchor_text=write_anchor_text,
+#                            write_both=write_both, link_prob=link_prob, num_cpu=8, wiki_2_fb=wiki_2_fb,
+#                            redirects=redirects)
