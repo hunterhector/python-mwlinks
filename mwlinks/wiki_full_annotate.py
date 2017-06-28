@@ -55,7 +55,7 @@ def write_anchor_spotted(output, freebase_map, redirects, item):
     spotted_data['bodyText'] = wiki_text
     spotted_data['title'] = title_entity
     spotted_data['spot'] = {}
-    spotted_data['spot']['bodyText'] = find_spots_in_text(wiki_text, title_entity, wiki_links, freebase_map, redirects)
+    spotted_data['spot']['bodyText'] = find_spots_in_text(wiki_text, title, wiki_links, freebase_map, redirects)
 
     spotted_data_json = json.dumps(spotted_data)
 
@@ -63,7 +63,16 @@ def write_anchor_spotted(output, freebase_map, redirects, item):
     output.write("\n")
 
 
-def find_spots_in_text(text, title, anchors, freebase_map, redirects):
+def find_spots_in_text(text, title, wiki_links, freebase_map, redirects):
+    """
+    Find in the Wikipedia text additional spotting by using the surface->target links in the same page.
+    :param text: The actual page text.
+    :param title: The title of the page, not normalized.
+    :param wiki_links: The Wiki links in this page.
+    :param freebase_map: A mapping from Wikipedia to Freebase.
+    :param redirects: Redirect of pages.
+    :return: 
+    """
     all_spots = []
 
     # Find out the title's entity.
@@ -71,16 +80,18 @@ def find_spots_in_text(text, title, anchors, freebase_map, redirects):
     title_entity = get_wiki_title(title)
     title_length = len(title.split(" "))
 
+    # Store all possible surface forms, organized by token length.
     surface_2_spots = {}
+
+    # Store possible surface form length.
+    surface_form_lengths = set()
+    surface_form_lengths.add(title_length)
 
     # Add title entity in the surface search.
     surface_2_spots[title_length] = {}
     surface_2_spots[title_length][title] = (title_entity, title_fb_id)
 
-    anchor_lengths = set()
-    anchor_lengths.add(title_length)
-
-    for link, span in anchors:
+    for link, span in wiki_links:
         anchor = link.anchor
         target = link.link
         target_normalized = get_wiki_title(target)
@@ -88,7 +99,7 @@ def find_spots_in_text(text, title, anchors, freebase_map, redirects):
         fb_id = get_freebase_id(freebase_map, redirects, target)
 
         length = len(anchor.split(" "))
-        anchor_lengths.add(length)
+        surface_form_lengths.add(length)
 
         if length not in surface_2_spots:
             surface_2_spots[length] = {}
@@ -98,7 +109,7 @@ def find_spots_in_text(text, title, anchors, freebase_map, redirects):
     tokens = text.split()
 
     for begin in range(len(tokens)):
-        for l in anchor_lengths:
+        for l in surface_form_lengths:
             end = begin + l
 
             spot_map = surface_2_spots[l]
@@ -109,10 +120,7 @@ def find_spots_in_text(text, title, anchors, freebase_map, redirects):
                 if window_text in spot_map:
                     target, fb_id = spot_map[window_text]
 
-                    spot = {}
-                    spot['loc'] = [begin, end]
-                    spot['surface'] = window_text
-                    spot['entity'] = {'wiki': target, 'freebase': fb_id}
+                    spot = {'loc': [begin, end], 'surface': window_text, 'entity': {'wiki': target, 'freebase': fb_id}}
 
                     all_spots.append(spot)
 
