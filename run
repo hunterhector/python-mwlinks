@@ -1,4 +1,6 @@
 #!/usr/bin/env python
 from mwlinks import wiki_dump_processor
+from mwlinks import wiki_full_annotate
 
-wiki_dump_processor.main()
+# wiki_dump_processor.main()
+wiki_full_annotate.main()
