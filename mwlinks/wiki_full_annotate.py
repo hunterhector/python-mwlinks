@@ -49,12 +49,13 @@ def write_anchor_spotted(output, freebase_map, redirects, item):
     extract_cleaned_text(wiki_id, revision_id, title, text, out)
 
     wiki_text = out.getvalue()
+    title_entity = get_wiki_title(title)
 
     spotted_data = {}
     spotted_data['bodyText'] = wiki_text
-    spotted_data['title'] = title
+    spotted_data['title'] = title_entity
     spotted_data['spot'] = {}
-    spotted_data['spot']['bodyText'] = find_spots_in_text(wiki_text, title, wiki_links, freebase_map, redirects)
+    spotted_data['spot']['bodyText'] = find_spots_in_text(wiki_text, title_entity, wiki_links, freebase_map, redirects)
 
     spotted_data_json = json.dumps(spotted_data)
 
@@ -67,13 +68,14 @@ def find_spots_in_text(text, title, anchors, freebase_map, redirects):
 
     # Find out the title's entity.
     title_fb_id = get_freebase_id(freebase_map, redirects, title)
+    title_entity = get_wiki_title(title)
     title_length = len(title.split(" "))
 
     surface_2_spots = {}
 
     # Add title entity in the surface search.
     surface_2_spots[title_length] = {}
-    surface_2_spots[title_length][title] = (title, title_fb_id)
+    surface_2_spots[title_length][title] = (title_entity, title_fb_id)
 
     anchor_lengths = set()
     anchor_lengths.add(title_length)
@@ -81,6 +83,7 @@ def find_spots_in_text(text, title, anchors, freebase_map, redirects):
     for link, span in anchors:
         anchor = link.anchor
         target = link.link
+        target_normalized = get_wiki_title(target)
 
         fb_id = get_freebase_id(freebase_map, redirects, target)
 
@@ -90,7 +93,7 @@ def find_spots_in_text(text, title, anchors, freebase_map, redirects):
         if length not in surface_2_spots:
             surface_2_spots[length] = {}
 
-        surface_2_spots[length][anchor] = (target, fb_id)
+        surface_2_spots[length][anchor] = (target_normalized, fb_id)
 
     tokens = text.split()
 
