@@ -203,7 +203,7 @@ def extract_cleaned_text(id, revid, title, text, out):
 
 
 def get_freebase_id(freebase_map: Dict, redirects, wiki_title):
-    key = wiki_title.replace(" ", "_")
+    key = get_wiki_title(wiki_title)
 
     if key in redirects:
         key = redirects[key]
@@ -212,6 +212,20 @@ def get_freebase_id(freebase_map: Dict, redirects, wiki_title):
         return freebase_map[key]
     except KeyError:
         return None
+
+
+def get_wiki_title(link):
+    """
+    Normalize the link name of the link, such as replacing space, and first letter capitalization. 
+    See: https://en.wikipedia.org/wiki/Wikipedia:Naming_conventions_(capitalization)#Software_characteristics
+    :param link: 
+    :return: 
+    """
+    return cap_first(link.replace(" ", "_"))
+
+
+def cap_first(s):
+    return s[:1].upper() + s[1:]
 
 
 def read_wiki_fb_mapping(mapping_file):
