@@ -136,9 +136,9 @@ def parse_as_spots(dump_file, output_path, redirects, wiki_2_fb={}, num_cpu=5):
 
     dump = mwxml.Dump.from_file(mwtypes.files.reader(dump_file))
 
-    output = open(os.path.join(output_path, "wikipedia.json"), 'w')
+    print("Writing to " + os.path.join(output_path, "wikipedia.json"))
 
-    sl = SurfaceLinkMap()
+    output = open(os.path.join(output_path, "wikipedia.json"), 'w')
 
     v = Value('i', 0)
     lock = Lock()
@@ -230,10 +230,10 @@ def get_redirects(args):
 
     from linker.data import data_utils
 
-    logging.info("Loading redirect pages.")
+    print("Loading redirect pages.")
     redirects = data_utils.run_or_load(os.path.join(output_path, "redirects.pickle"), data_utils.load_redirects,
                                        redirect_path)
-    logging.info("Done")
+    print("Done")
 
     return redirects
 
