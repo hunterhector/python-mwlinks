@@ -34,7 +34,7 @@ import json
 import logging
 import logging.config
 from mwlinks.libs.WikiExtractor import Extractor
-from multiprocessing import Pool, Value, Lock, Queue, Manager
+from multiprocessing import Pool, Value, Lock, Queue
 from io import StringIO
 import datetime
 
@@ -75,7 +75,7 @@ class SurfaceLinkMap:
         return self.__surface_indices
 
 
-def process_links(wikilinks: Iterable[Tuple[Wikilink, Span]], freebase_map, redirects, gotchas, misses):
+def process_links(wikilinks: Iterable[Tuple[Wikilink, Span]], freebase_map, redirects):
     links = []
     for link, span in wikilinks:
         if not is_ignore_link(link):
@@ -307,7 +307,7 @@ def parse_dump_producer(dump_file, output_path, consumer, redirects={}, wiki_2_f
             continue
 
         title_wiki_name, title_fb_id = get_name_and_id(title, redirects, wiki_2_fb)
-        links = process_links(wiki_links, wiki_2_fb, redirects, found_pages, failed_pages)
+        links = process_links(wiki_links, wiki_2_fb, redirects)
 
         for anchor, wiki_title, fb_id, span in links:
             if fb_id is not None:
