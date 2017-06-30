@@ -275,7 +275,7 @@ class WikiSpotConsumer:
                     if window_text in spot_map:
                         wiki_name, fb_id = spot_map[window_text]
                         spot = {'loc': [begin, end], 'surface': window_text,
-                                'entity': [{'wiki': wiki_name, 'id': fb_id}]}
+                                'entities': [{'wiki': wiki_name, 'id': fb_id}]}
                         all_spots.append(spot)
 
         return all_spots
@@ -330,7 +330,7 @@ def parse_dump_producer(dump_file, output_path, consumer, redirects={}, wiki_2_f
     out_wiki_not_found = open(os.path.join(output_path, "wiki_not_found.txt"), encoding='UTF-8', mode='w')
     out_wiki_not_found.write("%d links found, %d links missed.\n" % (len(found_pages), len(failed_pages)))
     out_wiki_not_found.write("================================\n")
-    for p, _ in failed_pages.items():
+    for p in failed_pages:
         out_wiki_not_found.write(p)
         out_wiki_not_found.write("\n")
     out_wiki_not_found.close()
