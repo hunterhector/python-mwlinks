@@ -120,7 +120,7 @@ def find_spots_in_text(text, title, wiki_links, freebase_map, redirects):
                 if window_text in spot_map:
                     target, fb_id = spot_map[window_text]
 
-                    spot = {'loc': [begin, end], 'surface': window_text, 'entity': {'wiki': target, 'freebase': fb_id}}
+                    spot = {'loc': [begin, end], 'surface': window_text, 'entity': [{'wiki': target, 'id': fb_id}]}
 
                     all_spots.append(spot)
 

@@ -75,40 +75,24 @@ class SurfaceLinkMap:
         return self.__surface_indices
 
 
-def parse(out_files, item):
-    wiki_id, title, redirect, revision_id, sorted_links, text = item
-
-    for key, out_file in out_files.items():
-        out = StringIO()
-        if key == "origin":
-            clean_wiki_text(sorted_links, wiki_id, revision_id, title, text, out, use_plain_text=True)
-            out_file.write(out.getvalue())
-
-        if key == "replaced":
-            clean_wiki_text(sorted_links, wiki_id, revision_id, title, text, out, use_link=True)
-            out_file.write(out.getvalue())
-
-        if key == "both":
-            clean_wiki_text(sorted_links, wiki_id, revision_id, title, text, out, True, True)
-            both_text = out.getvalue()
-            out_file.write(mix_up(both_text))
-
-
 def process_links(wikilinks: Iterable[Tuple[Wikilink, Span]], freebase_map, redirects, gotchas, misses):
     links = []
     for link, span in wikilinks:
         if not is_ignore_link(link):
-            wiki_title = get_wiki_title(link.link)
-            if wiki_title in redirects:
-                wiki_title = redirects[wiki_title]
-
-            if wiki_title in freebase_map:
-                links.append((link.anchor, freebase_map[wiki_title], span))
-                gotchas[wiki_title] = 0
-            else:
-                misses[wiki_title] = 0
-
+            wiki_title, fb_id = get_name_and_id(link.link, redirects, freebase_map)
+            links.append((link.anchor, wiki_title, fb_id, span))
     return links
+
+
+def get_name_and_id(title, redirects, freebase_map):
+    wiki_title = format_wiki_title(title)
+    if wiki_title in redirects:
+        wiki_title = redirects[wiki_title]
+
+    if wiki_title in freebase_map:
+        return wiki_title, freebase_map[wiki_title]
+    else:
+        return wiki_title, None
 
 
 def mix_up(text):
@@ -125,68 +109,224 @@ def mix_up(text):
     return "\n".join(mixed_text) + "\n"
 
 
-def process(q: Queue, v: Value, lock: Lock, outputs):
-    while True:
-        item = q.get()
-        if item is None:
-            break
+class WriteTextConsumer:
+    def __init__(self, output_path, write_text=False, write_anchor_text=False, write_both=False, num_cpu=5):
+        self.outputs = {}
+        self.p = None
 
-        parse(outputs, item)
+        if write_text:
+            self.outputs["origin"] = open(os.path.join(output_path, "origin.txt"), 'w')
+        if write_anchor_text:
+            self.outputs["replaced"] = open(os.path.join(output_path, "replaced.txt"), 'w')
+        if write_both:
+            self.outputs["both"] = open(os.path.join(output_path, "both.txt"), 'w')
 
-        with lock:
-            v.value += 1
-            sys.stdout.write("\r[%s] Processed %d documents." % (datetime.datetime.now().time(), v.value))
-            sys.stdout.flush()
+        self.num_cpu = num_cpu
+
+    def prepare_consumer(self, queue):
+        v = Value('i', 0)
+        lock = Lock()
+        self.p = Pool(self.num_cpu, initializer=self.write_text_consumer, initargs=(queue, v, lock, self.outputs))
+
+    def write_text_consumer(self, q: Queue, v: Value, lock: Lock):
+        while True:
+            item = q.get()
+            if item is None:
+                break
+
+            self.write_as_text(item)
+
+            with lock:
+                v.value += 1
+                sys.stdout.write("\r[%s] Processed %d documents." % (datetime.datetime.now().time(), v.value))
+                sys.stdout.flush()
+
+    def write_as_text(self, item):
+        wiki_id, title, title_fb_id, redirect, revision_id, links, text = item
+
+        sorted_links = sorted([l for l in links if l[2] is not None], key=itemgetter(2))
+
+        if redirect:
+            return
+
+        for key, out_file in self.outputs.items():
+            out = StringIO()
+            if key == "origin":
+                clean_wiki_text(sorted_links, wiki_id, revision_id, title, text, out, use_plain_text=True)
+                out_file.write(out.getvalue())
+
+            if key == "replaced":
+                clean_wiki_text(sorted_links, wiki_id, revision_id, title, text, out, use_link=True)
+                out_file.write(out.getvalue())
+
+            if key == "both":
+                clean_wiki_text(sorted_links, wiki_id, revision_id, title, text, out, True, True)
+                both_text = out.getvalue()
+                out_file.write(mix_up(both_text))
+
+    def close(self):
+        self.p.close()
+        for key, out in self.outputs.items():
+            out.close()
 
 
-def parse_dump(dump_file, output_path, redirects={}, wiki_2_fb={}, write_text=False, write_anchor_text=False,
-               write_both=False, link_prob=False, num_cpu=5):
+class WikiSpotConsumer:
+    def __init__(self, output_path, num_cpu=5):
+        self.output = open(os.path.join(output_path, "wikipedia.json"), 'w')
+        self.num_cpu = num_cpu
+        self.p = None
+
+    def prepare_consumer(self, queue: Queue):
+        v = Value('i', 0)
+        lock = Lock()
+        self.p = Pool(self.num_cpu, initializer=self.spot_consumer, initargs=(queue, v, lock))
+
+    def spot_consumer(self, queue: Queue, v: Value, lock: Lock):
+        while True:
+            item = queue.get()
+            if item is None:
+                break
+
+            self.write_anchor_spotted(item)
+
+            with lock:
+                v.value += 1
+                sys.stdout.write("\r[%s] Processed %d documents." % (datetime.datetime.now().time(), v.value))
+                sys.stdout.flush()
+
+    def write_anchor_spotted(self, item):
+        wiki_id, title, title_fb_id, redirect, revision_id, sorted_links, text = item
+
+        if redirect:
+            return
+
+        out = StringIO()
+
+        # Write the Wiki text to the StringIO object.
+        write_cleaned_text(wiki_id, revision_id, title, text, out)
+        wiki_text = out.getvalue()
+        title_entity = format_wiki_title(title)
+
+        title_words = title.split()
+        title = ' '.join(title_words)
+
+        body_text = wiki_text.split("\n\n", 1)[1]
+
+        spotted_data = {}
+        spotted_data['bodyText'] = ' '.join(body_text.split())
+        spotted_data['title'] = title
+        spotted_data['spot'] = {}
+        spotted_data['spot']['bodyText'] = \
+            self.find_spots_in_text(wiki_text, title, title_fb_id, sorted_links)
+        spotted_data['spot']['title'] = [
+            {"loc": [0, len(title_words)], "surface": [title], "entities": [{"wiki": title_entity, "id": title_fb_id}]}
+        ]
+
+        spotted_data_json = json.dumps(spotted_data)
+        self.output.write(spotted_data_json + "\n")
+
+    @staticmethod
+    def find_spots_in_text(text, title, title_fb_id, sorted_links):
+        """
+        Find in the Wikipedia text additional spotting by using the surface->target links in the same page.
+        :param text: The actual page text.
+        :param title: The title of the page, not normalized.
+        :param sorted_links: The Wiki links in this page, sorted. With mapping to Freebase, and title normalized.
+        :param freebase_map: A mapping from Wikipedia to Freebase.
+        :param redirects: Redirect of pages.
+        :return: 
+        """
+        all_spots = []
+
+        # Find out the title's entity.
+        title_entity = format_wiki_title(title)
+        title_length = len(title.split(" "))
+
+        # Store all possible surface forms, organized by token length.
+        surface_2_spots = {}
+
+        # Store possible surface form length.
+        surface_form_lengths = set()
+        surface_form_lengths.add(title_length)
+
+        # Add title entity in the surface search.
+        surface_2_spots[title_length] = {}
+        surface_2_spots[title_length][title] = (title_entity, title_fb_id)
+
+        for anchor, wiki_name, fb_id, span in reversed(sorted_links):
+            length = len(anchor.split(" "))
+            surface_form_lengths.add(length)
+
+            if length not in surface_2_spots:
+                surface_2_spots[length] = {}
+            surface_2_spots[length][anchor] = (wiki_name, fb_id)
+
+        tokens = text.split()
+
+        for begin in range(len(tokens)):
+            for l in surface_form_lengths:
+                end = begin + l
+
+                spot_map = surface_2_spots[l]
+                if end <= len(tokens):
+                    window_tokens = tokens[begin:end]
+                    window_text = " ".join(window_tokens)
+
+                    if window_text in spot_map:
+                        wiki_name, fb_id = spot_map[window_text]
+                        spot = {'loc': [begin, end], 'surface': window_text,
+                                'entity': [{'wiki': wiki_name, 'id': fb_id}]}
+                        all_spots.append(spot)
+
+        return all_spots
+
+    def close(self):
+        self.p.close()
+        self.output.close()
+
+
+def parse_dump_producer(dump_file, output_path, consumer, redirects={}, wiki_2_fb={}, link_prob=False, num_cpu=5):
     logging.info("Starting dump parsing.")
     print("Start parsing the dump.")
 
     dump = mwxml.Dump.from_file(mwtypes.files.reader(dump_file))
 
-    outputs = {}
+    failed_pages = set()
+    found_pages = set()
 
-    if write_text:
-        outputs["origin"] = open(os.path.join(output_path, "origin.txt"), 'w')
-    if write_anchor_text:
-        outputs["replaced"] = open(os.path.join(output_path, "replaced.txt"), 'w')
-    if write_both:
-        outputs["both"] = open(os.path.join(output_path, "both.txt"), 'w')
+    q = Queue(maxsize=num_cpu)
 
     sl = SurfaceLinkMap()
 
-    v = Value('i', 0)
-    lock = Lock()
-    q = Queue(maxsize=num_cpu)
-    failed_pages = Manager().dict()
-    found_pages = Manager().dict()
+    # The consumer will start looping and wait for items.
+    consumer.prepare_consumer(q)
 
-    p = Pool(num_cpu, initializer=process, initargs=(q, v, lock, outputs))
-
-    # count = 100
     for wiki_id, title, redirect, revision_id, wiki_links, text in page_parser.parse(dump, True):
+        if redirect:
+            # Ignoring redirect pages.
+            continue
+
+        title_wiki_name, title_fb_id = get_name_and_id(title, redirects, wiki_2_fb)
         links = process_links(wiki_links, wiki_2_fb, redirects, found_pages, failed_pages)
-        sorted_links = sorted(links, key=itemgetter(2))
-        element = (wiki_id, title, redirect, revision_id, sorted_links, text)
+
+        for anchor, wiki_title, fb_id, span in links:
+            if fb_id is not None:
+                found_pages.add(wiki_title)
+            else:
+                failed_pages.add(wiki_title)
+
+        element = (wiki_id, title, title_fb_id, redirect, revision_id, links, text)
         q.put(element)
 
         if link_prob:
-            # Currently do not calculate the link probability for the surface terms.
-            for anchor, fb_id, span in sorted_links:
-                sl.add_surface_link(anchor, fb_id)
-
-                # count -= 1
-                # if count == 0:
-                #     break
+            for anchor, wiki_name, fb_id, span in links:
+                if fb_id is not None:
+                    sl.add_surface_link(anchor, fb_id)
 
     print("\nParsing done.")
-    p.close()
+    consumer.close()
 
-    for key, out in outputs.items():
-        out.close()
-
+    # Logging additional debug information.
     out_wiki_not_found = open(os.path.join(output_path, "wiki_not_found.txt"), encoding='UTF-8', mode='w')
     out_wiki_not_found.write("%d links found, %d links missed.\n" % (len(found_pages), len(failed_pages)))
     out_wiki_not_found.write("================================\n")
@@ -268,7 +408,7 @@ def clean_wiki_text(links, pageid, revid, title, text, out, use_plain_text=False
 
 
 def format_anchor(links, text, use_freebase=False):
-    for anchor, fb_id, span in reversed(links):
+    for anchor, wiki_name, fb_id, span in reversed(links):
         if use_freebase:
             text = replace_by_index(text, span.begin, span.end, fb_id)
         else:
@@ -287,7 +427,7 @@ def is_ignore_link(link: Wikilink):
     return False
 
 
-def get_wiki_title(link):
+def format_wiki_title(link):
     """
     Normalize the link name of the link, such as replacing space, and first letter capitalization. 
     See: https://en.wikipedia.org/wiki/Wikipedia:Naming_conventions_(capitalization)#Software_characteristics
@@ -330,9 +470,7 @@ def main():
     output_path = args['--output-path']
     redirect_path = args['--redirect-path']
 
-    sys.path.append("../../projects/KnowledgeIR")
     from linker.data import data_utils
-
     logging.info("Loading redirect pages.")
     redirects = data_utils.run_or_load(os.path.join(output_path, "redirects.pickle"), data_utils.load_redirects,
                                        redirect_path)
@@ -349,5 +487,8 @@ def main():
     handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s %(message)s'))
     root.addHandler(handler)
 
-    parse_dump(dump_file, output_path, write_text=write_text, write_anchor_text=write_anchor_text,
-               write_both=write_both, link_prob=link_prob, wiki_2_fb=wiki_2_fb, redirects=redirects, num_cpu=8)
+    # consumer = WriteTextConsumer(output_path, write_text, write_anchor_text, write_both, 5)
+    consumer = WikiSpotConsumer(output_path, 5)
+
+    parse_dump_producer(dump_file, output_path, consumer, link_prob=link_prob, wiki_2_fb=wiki_2_fb,
+                        redirects=redirects, num_cpu=8)
