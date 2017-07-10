@@ -37,8 +37,9 @@ from mwlinks.libs.WikiExtractor import Extractor
 from multiprocessing import Pool, Value, Lock, Queue
 from io import StringIO
 import datetime
+import nltk
 
-links_to_ignore = {"File", "Category"}
+links_to_ignore = {"File", "Category", "wikt"}
 
 
 class SurfaceLinkMap:
@@ -197,38 +198,78 @@ class WikiSpotConsumer:
     def write_anchor_spotted(self, item):
         wiki_id, title, title_fb_id, redirect, revision_id, sorted_links, text = item
 
+        # # Make the link as one single token (without spaces), including the anchor and wiki name.
+        # named_sorted_links = [
+        #     (anchor,
+        #      "inline_wikilink++" + wiki_name + "++" + (fb_id if fb_id else "NONE") + "++" + "__".join(anchor.split()),
+        #      fb_id, span) for (anchor, wiki_name, fb_id, span) in sorted_links]
+
+        placeholder_links = []
+        for anchor, wiki_name, fb_id, span in sorted_links:
+            placeholder_links.append((anchor, "HectorReplacement", fb_id, span))
+
+        placeholder_text = format_anchor(placeholder_links, text)
+
         if redirect:
             return
 
         out = StringIO()
 
         # Write the Wiki text to the StringIO object.
-        write_cleaned_text(wiki_id, revision_id, title, text, out)
+        write_cleaned_text(wiki_id, revision_id, title, placeholder_text, out)
         wiki_text = out.getvalue()
+        title_text, body_text = wiki_text.split("\n\n", 1)
+
+        title_tokens = nltk.word_tokenize(title_text)
+        wiki_body_tokens = nltk.word_tokenize(body_text)
         title_entity = format_wiki_title(title)
 
-        title_words = title.split()
-        title = ' '.join(title_words)
-
-        body_text = wiki_text.split("\n\n", 1)[1]
+        title = ' '.join(title_tokens)
 
         spotted_data = {}
-        spotted_data['bodyText'] = ' '.join(body_text.split())
-        spotted_data['title'] = title
+
+        body_spots = self.find_spots_in_text(wiki_body_tokens, title, title_fb_id, sorted_links)
+
+        spotted_data['bodyText'] = self.recover_text(wiki_body_tokens, sorted_links)
+        spotted_data['title'] = " ".join(title_tokens)
         spotted_data['spot'] = {}
-        spotted_data['spot']['bodyText'] = \
-            self.find_spots_in_text(wiki_text, title, title_fb_id, sorted_links)
+        spotted_data['spot']['bodyText'] = body_spots
         spotted_data['spot']['title'] = [
-            {"loc": [0, len(title_words)], "surface": [title], "entities": [{"wiki": title_entity, "id": title_fb_id}]}
+            {"loc": [0, len(title_tokens)], "surface": [title],
+             "entities": [{"wiki": title_entity, "id": title_fb_id if title_fb_id else "None"}]}
         ]
 
         spotted_data_json = json.dumps(spotted_data)
+
+        # print(spotted_data_json)
+
         self.output.write(spotted_data_json + "\n")
 
     @staticmethod
-    def find_spots_in_text(text, title, title_fb_id, sorted_links):
+    def recover_text(wiki_text_tokens, sorted_links):
+        split = ""
+        recovered_text = ""
+
+        link_index = 0
+
+        for token in wiki_text_tokens:
+            recovered_text += split
+            if token == "HectorReplacement":
+                anchor, wiki_name, fb_id, span = sorted_links[link_index]
+                # link = sorted_links[link_index]
+                actual_anchor_tokens = nltk.word_tokenize(anchor)
+                recovered_text += " ".join(actual_anchor_tokens)
+                link_index += 1
+            else:
+                recovered_text += token
+            split = " "
+        return recovered_text
+
+    @staticmethod
+    def find_spots_in_text(tokens, title, title_fb_id, sorted_links):
         """
         Find in the Wikipedia text additional spotting by using the surface->target links in the same page.
+        :param tokens: 
         :param text: The actual page text.
         :param title: The title of the page, not normalized.
         :param sorted_links: The Wiki links in this page, sorted. With mapping to Freebase, and title normalized.
@@ -238,45 +279,107 @@ class WikiSpotConsumer:
         """
         all_spots = []
 
-        # Find out the title's entity.
-        title_entity = format_wiki_title(title)
-        title_length = len(title.split(" "))
-
         # Store all possible surface forms, organized by token length.
         surface_2_spots = {}
 
         # Store possible surface form length.
         surface_form_lengths = set()
-        surface_form_lengths.add(title_length)
-
-        # Add title entity in the surface search.
-        surface_2_spots[title_length] = {}
-        surface_2_spots[title_length][title] = (title_entity, title_fb_id)
 
         for anchor, wiki_name, fb_id, span in reversed(sorted_links):
-            length = len(anchor.split(" "))
+            length = len(nltk.word_tokenize(anchor))
             surface_form_lengths.add(length)
 
             if length not in surface_2_spots:
                 surface_2_spots[length] = {}
-            surface_2_spots[length][anchor] = (wiki_name, fb_id)
 
-        tokens = text.split()
+            surface_2_spots[length][anchor] = {}
+
+            # For the other surface anchors, we count the counts pointing to different entities.
+            try:
+                surface_2_spots[length][anchor][(wiki_name, fb_id)] += 1
+                # print("%s:%d", wiki_name, surface_2_spots[length][anchor][(wiki_name, fb_id)])
+            except KeyError:
+                surface_2_spots[length][anchor][(wiki_name, fb_id)] = 1
+                # print("First seen: %s:%d", wiki_name, surface_2_spots[length][anchor][(wiki_name, fb_id)])
+
+        surface_2_sorted_spots = {}
+
+        for length, anchor_map in surface_2_spots.items():
+            surface_2_sorted_spots[length] = {}
+            for anchor, entity_counts in anchor_map.items():
+                tokenized_anchor = " ".join(nltk.word_tokenize(anchor))
+                sorted_entity_counts = sorted(entity_counts.items(), key=itemgetter(1), reverse=True)
+                surface_2_sorted_spots[length][tokenized_anchor] = sorted_entity_counts
+
+        # Find out the title's entity.
+        title_entity = format_wiki_title(title)
+        title_tokens = nltk.word_tokenize(title)
+        title_length = len(title_tokens)
+
+        if title_length not in surface_2_sorted_spots:
+            surface_2_sorted_spots[title_length] = {}
+
+        if title not in surface_2_sorted_spots[title_length]:
+            surface_2_sorted_spots[title_length][title] = []
+
+        surface_form_lengths.add(title_length)
+        surface_2_sorted_spots[title_length][" ".join(title_tokens)].insert(0, ((title_entity, title_fb_id), 0))
+
+        offset = 0
+        link_index = 0
+
+        anchor_memory = {}
 
         for begin in range(len(tokens)):
-            for l in surface_form_lengths:
-                end = begin + l
+            begin_token = tokens[begin]
+            if begin_token == "HectorReplacement":
+                # print(begin_token)
+                anchor, wiki_name, fb_id, span = sorted_links[link_index]
+                actual_anchor_tokens = nltk.word_tokenize(anchor)
+                anchor_length = len(actual_anchor_tokens)
+                end = begin + anchor_length
 
-                spot_map = surface_2_spots[l]
-                if end <= len(tokens):
-                    window_tokens = tokens[begin:end]
-                    window_text = " ".join(window_tokens)
+                spot = {'loc': [begin + offset, end + offset], 'surface': " ".join(actual_anchor_tokens),
+                        'entities': [{'wiki': wiki_name, 'id': fb_id}]}
+                all_spots.append(spot)
 
-                    if window_text in spot_map:
-                        wiki_name, fb_id = spot_map[window_text]
-                        spot = {'loc': [begin, end], 'surface': window_text,
-                                'entities': [{'wiki': wiki_name, 'id': fb_id}]}
-                        all_spots.append(spot)
+                # Remember which wiki name this anchor points to, and the token index where it happens.
+                anchor_memory[anchor] = (wiki_name, fb_id, begin)
+
+                # This token actual may contain multiple tokens, we add the token differences to the offset to
+                # compensate this.
+                offset += anchor_length - 1
+                link_index += 1
+            else:
+                for l in surface_form_lengths:
+                    end = begin + l
+
+                    anchor_map = surface_2_sorted_spots[l]
+
+                    if end <= len(tokens):
+                        window_tokens = tokens[begin:end]
+                        window_text = " ".join(window_tokens)
+
+                        if window_text in anchor_map:
+                            sorted_wiki_targets = anchor_map[window_text]
+                            # Take from the top of the target.
+                            (wiki_name, fb_id), pref = sorted_wiki_targets[0]
+
+                            if not pref == 0:
+                                # If we found it in the anchor memory, then use it to annotate the current one.
+                                if window_text in anchor_memory:
+                                    previous_wiki_name, previous_fb_id, happen_index = anchor_memory[window_text]
+                                    if begin - happen_index <= 50:
+                                        # If something is found in the anchor memory, we use that as the annotation.
+                                        wiki_name = previous_wiki_name
+                                        fb_id = previous_fb_id
+                                    else:
+                                        # If it is expired, remove it.
+                                        anchor_memory.pop(window_text, None)
+
+                            spot = {'loc': [begin + offset, end + offset], 'surface': window_text,
+                                    'entities': [{'wiki': wiki_name, 'id': fb_id if fb_id else "None"}]}
+                            all_spots.append(spot)
 
         return all_spots
 
@@ -410,9 +513,10 @@ def clean_wiki_text(links, pageid, revid, title, text, out, use_plain_text=False
 def format_anchor(links, text, use_freebase=False):
     for anchor, wiki_name, fb_id, span in reversed(links):
         if use_freebase:
-            text = replace_by_index(text, span.begin, span.end, fb_id)
+            if fb_id is not None:
+                text = replace_by_index(text, span.begin, span.end, fb_id)
         else:
-            text = replace_by_index(text, span.begin, span.end, anchor)
+            text = replace_by_index(text, span.begin, span.end, wiki_name)
 
     return text
 
@@ -491,4 +595,4 @@ def main():
     consumer = WikiSpotConsumer(output_path, 5)
 
     parse_dump_producer(dump_file, output_path, consumer, link_prob=link_prob, wiki_2_fb=wiki_2_fb,
-                        redirects=redirects, num_cpu=8)
+                        redirects=redirects, num_cpu=1)
