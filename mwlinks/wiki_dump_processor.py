@@ -13,6 +13,7 @@ Options:
     --link-prob             Calculate link probability
     --freebase-map=FB_MAP   Freebase mapping file
     --redirect-path=REDIRECTS   Redirect file
+    --redirect-pickle=REDIRECT_PICKLE A path that is to loaded redirects from or save into
     <dump-file>             Path to a set of XML dumps files
                             (pages meta history)
     -h --help               Prints this documentation
@@ -315,15 +316,16 @@ class WikiSpotConsumer:
         title_entity = format_wiki_title(title)
         title_tokens = nltk.word_tokenize(title)
         title_length = len(title_tokens)
+        tokenized_title = " ".join(title_tokens)
 
         if title_length not in surface_2_sorted_spots:
             surface_2_sorted_spots[title_length] = {}
 
-        if title not in surface_2_sorted_spots[title_length]:
-            surface_2_sorted_spots[title_length][title] = []
+        if tokenized_title not in surface_2_sorted_spots[title_length]:
+            surface_2_sorted_spots[title_length][tokenized_title] = []
 
         surface_form_lengths.add(title_length)
-        surface_2_sorted_spots[title_length][" ".join(title_tokens)].insert(0, ((title_entity, title_fb_id), 0))
+        surface_2_sorted_spots[title_length][tokenized_title].insert(0, ((title_entity, title_fb_id), 0))
 
         offset = 0
         link_index = 0
@@ -365,6 +367,7 @@ class WikiSpotConsumer:
                             # Take from the top of the target.
                             (wiki_name, fb_id), pref = sorted_wiki_targets[0]
 
+                            # If preference is 0, that means this is the title entity, top priority.
                             if not pref == 0:
                                 # If we found it in the anchor memory, then use it to annotate the current one.
                                 if window_text in anchor_memory:
@@ -573,16 +576,23 @@ def main():
     free_base_mapping = args['--freebase-map']
     output_path = args['--output-path']
     redirect_path = args['--redirect-path']
+    redirect_pickle = args['--redirect-pickle']
+
+    if redirect_pickle is None:
+        redirect_pickle = os.path.join(output_path, "redirects.pickle")
 
     from linker.data import data_utils
     logging.info("Loading redirect pages.")
-    redirects = data_utils.run_or_load(os.path.join(output_path, "redirects.pickle"), data_utils.load_redirects,
-                                       redirect_path)
+    print("Loading redirect pages.")
+    redirects = data_utils.run_or_load(redirect_pickle, data_utils.load_redirects, redirect_path)
+    print("Done.")
     logging.info("Done")
 
+    logging.info("Loading Wikipedia to Freebase.")
     print("Loading Wikipedia to Freebase.")
     wiki_2_fb = read_wiki_fb_mapping(free_base_mapping)
     print("Done.")
+    logging.info("Done")
 
     root = logging.getLogger()
     root.setLevel(logging.WARNING)
@@ -595,4 +605,4 @@ def main():
     consumer = WikiSpotConsumer(output_path, 5)
 
     parse_dump_producer(dump_file, output_path, consumer, link_prob=link_prob, wiki_2_fb=wiki_2_fb,
-                        redirects=redirects, num_cpu=1)
+                        redirects=redirects, num_cpu=6)
