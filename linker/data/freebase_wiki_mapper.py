@@ -29,16 +29,21 @@ class FreebaseWikiMapper:
             print("Mapping file exists, not overwriting")
             return
 
+        seen = set()
+
         with open(mapping_file, 'w') as out:
             count = 0
             for statements in NIFParser(fb_wiki_mapping_path):
                 for s, v, o in statements:
                     if str(v) == 'http://www.w3.org/2002/07/owl#sameAs':
                         fb_id = data_utils.canonical_freebase_id((str(o).replace(freebase_prefix, "")))
-                        wikipage_name = s.encode("utf-8").replace(dbpeida_prefix, "")
-                        out.write("%s\t%s\n" % (fb_id, wikipage_name))
-                        count += 1
-                        sys.stdout.write("\r[%s] found %d pairs." % (datetime.datetime.now().time(), count))
+                        s = s.toPython()
+                        if fb_id not in seen:
+                            wikipage_name = s.replace(dbpeida_prefix, "")
+                            out.write("%s\t%s\n" % (fb_id, wikipage_name))
+                            count += 1
+                            seen.add(fb_id)
+                        # sys.stdout.write("\r[%s] found %d pairs." % (datetime.datetime.now().time(), count))
             print("\nTotally %s mappings created." % count)
 
     def create_mapping_wiki_data_sql(self, fb_wd_mapping_path, wb_database_name, db_user_id, db_passwd):
@@ -91,10 +96,10 @@ def main():
     mapper = FreebaseWikiMapper(mapper_dir)
     # mapper.create_mapping_wiki_data_sql(fb_wd_mapping, "wikidatawiki_wb_items_per_site", "hector", "hector")
     mapper.create_mapping_dbpedia(fb_wd_mapping)
-    wiki_2_fb = mapper.read_wiki_fb_mapping()
-
-    print(wiki_2_fb["Mount_Everest"])
-    print(wiki_2_fb["Khasi–Khmuic_languages"])
+    # wiki_2_fb = mapper.read_wiki_fb_mapping()
+    #
+    # print(wiki_2_fb["Mount_Everest"])
+    # print(wiki_2_fb["Khasi–Khmuic_languages"])
 
 
 if __name__ == '__main__':

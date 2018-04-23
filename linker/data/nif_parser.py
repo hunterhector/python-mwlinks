@@ -59,7 +59,7 @@ class NIFParser:
         if not lines:
             raise StopIteration
 
-        return parse_nif_as_list(b''.join(lines).decode())
+        return parse_nif_as_list(''.join(lines))
 
     def read(self):
         return parse_nif_as_list(self.__nif.next())
