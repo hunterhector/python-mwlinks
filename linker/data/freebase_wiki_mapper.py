@@ -6,8 +6,8 @@ import sys
 from . import data_utils
 from .nif_parser import NIFParser
 
-if sys.version_info[0] == 2:
-    from .wiki_sql_linker import WbItemsPerSite
+# if sys.version_info[0] == 2:
+#     from .wiki_sql_linker import WbItemsPerSite
 
 freebase_prefix = "http://rdf.freebase.com/ns/"
 wikidata_prefix = "http://www.wikidata.org/entity/"
@@ -89,7 +89,8 @@ def main():
     mapper_dir = sys.argv[2]
 
     mapper = FreebaseWikiMapper(mapper_dir)
-    mapper.create_mapping_wiki_data_sql(fb_wd_mapping, "wikidatawiki_wb_items_per_site", "hector", "hector")
+    # mapper.create_mapping_wiki_data_sql(fb_wd_mapping, "wikidatawiki_wb_items_per_site", "hector", "hector")
+    mapper.create_mapping_dbpedia(fb_wd_mapping)
     wiki_2_fb = mapper.read_wiki_fb_mapping()
 
     print(wiki_2_fb["Mount_Everest"])
