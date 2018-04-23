@@ -37,13 +37,13 @@ class FreebaseWikiMapper:
                 for s, v, o in statements:
                     if str(v) == 'http://www.w3.org/2002/07/owl#sameAs':
                         fb_id = data_utils.canonical_freebase_id((str(o).replace(freebase_prefix, "")))
-                        s = s.toPython()
-                        if fb_id not in seen:
-                            wikipage_name = s.replace(dbpeida_prefix, "")
+                        wikipage_name = s.toPython().replace(dbpeida_prefix, "")
+
+                        if wikipage_name not in seen:
                             out.write("%s\t%s\n" % (fb_id, wikipage_name))
                             count += 1
-                            seen.add(fb_id)
-                        # sys.stdout.write("\r[%s] found %d pairs." % (datetime.datetime.now().time(), count))
+                            seen.add(wikipage_name)
+                            sys.stdout.write("\r[%s] found %d pairs." % (datetime.datetime.now().time(), count))
             print("\nTotally %s mappings created." % count)
 
     def create_mapping_wiki_data_sql(self, fb_wd_mapping_path, wb_database_name, db_user_id, db_passwd):
