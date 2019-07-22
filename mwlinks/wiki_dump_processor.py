@@ -26,6 +26,7 @@ import mwxml
 import mwtypes
 import os
 
+from collections import defaultdict
 import sys
 
 from mwlinks.libs import page_parser
@@ -77,11 +78,13 @@ class SurfaceLinkMap:
         return self.__surface_indices
 
 
-def process_links(wikilinks: Iterable[Tuple[Wikilink, Span]], freebase_map, redirects):
+def process_links(wikilinks: Iterable[Tuple[Wikilink, Span]], freebase_map,
+                  redirects):
     links = []
     for link, span in wikilinks:
         if not is_ignore_link(link):
-            wiki_title, fb_id = get_name_and_id(link.link, redirects, freebase_map)
+            wiki_title, fb_id = get_name_and_id(link.link, redirects,
+                                                freebase_map)
             links.append((link.anchor, wiki_title, fb_id, span))
     return links
 
@@ -112,23 +115,28 @@ def mix_up(text):
 
 
 class WriteTextConsumer:
-    def __init__(self, output_path, write_text=False, write_anchor_text=False, write_both=False, num_cpu=5):
+    def __init__(self, output_path, write_text=False, write_anchor_text=False,
+                 write_both=False, num_cpu=5):
         self.outputs = {}
         self.p = None
 
         if write_text:
-            self.outputs["origin"] = open(os.path.join(output_path, "origin.txt"), 'w')
+            self.outputs["origin"] = open(
+                os.path.join(output_path, "origin.txt"), 'w')
         if write_anchor_text:
-            self.outputs["replaced"] = open(os.path.join(output_path, "replaced.txt"), 'w')
+            self.outputs["replaced"] = open(
+                os.path.join(output_path, "replaced.txt"), 'w')
         if write_both:
-            self.outputs["both"] = open(os.path.join(output_path, "both.txt"), 'w')
+            self.outputs["both"] = open(os.path.join(output_path, "both.txt"),
+                                        'w')
 
         self.num_cpu = num_cpu
 
     def prepare_consumer(self, queue):
         v = Value('i', 0)
         lock = Lock()
-        self.p = Pool(self.num_cpu, initializer=self.write_text_consumer, initargs=(queue, v, lock, self.outputs))
+        self.p = Pool(self.num_cpu, initializer=self.write_text_consumer,
+                      initargs=(queue, v, lock, self.outputs))
 
     def write_text_consumer(self, q: Queue, v: Value, lock: Lock):
         while True:
@@ -140,13 +148,15 @@ class WriteTextConsumer:
 
             with lock:
                 v.value += 1
-                sys.stdout.write("\r[%s] Processed %d documents." % (datetime.datetime.now().time(), v.value))
+                sys.stdout.write("\r[%s] Processed %d documents." % (
+                datetime.datetime.now().time(), v.value))
                 sys.stdout.flush()
 
     def write_as_text(self, item):
         wiki_id, title, title_fb_id, redirect, revision_id, links, text = item
 
-        sorted_links = sorted([l for l in links if l[2] is not None], key=itemgetter(2))
+        sorted_links = sorted([l for l in links if l[2] is not None],
+                              key=itemgetter(2))
 
         if redirect:
             return
@@ -154,15 +164,18 @@ class WriteTextConsumer:
         for key, out_file in self.outputs.items():
             out = StringIO()
             if key == "origin":
-                clean_wiki_text(sorted_links, wiki_id, revision_id, title, text, out, use_plain_text=True)
+                clean_wiki_text(sorted_links, wiki_id, revision_id, title, text,
+                                out, use_plain_text=True)
                 out_file.write(out.getvalue())
 
             if key == "replaced":
-                clean_wiki_text(sorted_links, wiki_id, revision_id, title, text, out, use_link=True)
+                clean_wiki_text(sorted_links, wiki_id, revision_id, title, text,
+                                out, use_link=True)
                 out_file.write(out.getvalue())
 
             if key == "both":
-                clean_wiki_text(sorted_links, wiki_id, revision_id, title, text, out, True, True)
+                clean_wiki_text(sorted_links, wiki_id, revision_id, title, text,
+                                out, True, True)
                 both_text = out.getvalue()
                 out_file.write(mix_up(both_text))
 
@@ -181,7 +194,8 @@ class WikiSpotConsumer:
     def prepare_consumer(self, queue: Queue):
         v = Value('i', 0)
         lock = Lock()
-        self.p = Pool(self.num_cpu, initializer=self.spot_consumer, initargs=(queue, v, lock))
+        self.p = Pool(self.num_cpu, initializer=self.spot_consumer,
+                      initargs=(queue, v, lock))
 
     def spot_consumer(self, queue: Queue, v: Value, lock: Lock):
         while True:
@@ -193,7 +207,8 @@ class WikiSpotConsumer:
 
             with lock:
                 v.value += 1
-                sys.stdout.write("\r[%s] Processed %d documents." % (datetime.datetime.now().time(), v.value))
+                sys.stdout.write("\r[%s] Processed %d documents." % (
+                datetime.datetime.now().time(), v.value))
                 sys.stdout.flush()
 
     def write_anchor_spotted(self, item):
@@ -229,15 +244,18 @@ class WikiSpotConsumer:
 
         spotted_data = {}
 
-        body_spots = self.find_spots_in_text(wiki_body_tokens, title, title_fb_id, sorted_links)
+        body_spots = self.find_spots_in_text(wiki_body_tokens, title,
+                                             title_fb_id, sorted_links)
 
-        spotted_data['bodyText'] = self.recover_text(wiki_body_tokens, sorted_links)
+        spotted_data['bodyText'] = self.recover_text(wiki_body_tokens,
+                                                     sorted_links)
         spotted_data['title'] = " ".join(title_tokens)
         spotted_data['spot'] = {}
         spotted_data['spot']['bodyText'] = body_spots
         spotted_data['spot']['title'] = [
             {"loc": [0, len(title_tokens)], "surface": [title],
-             "entities": [{"wiki": title_entity, "id": title_fb_id if title_fb_id else "None"}]}
+             "entities": [{"wiki": title_entity,
+                           "id": title_fb_id if title_fb_id else "None"}]}
         ]
 
         spotted_data_json = json.dumps(spotted_data)
@@ -309,8 +327,10 @@ class WikiSpotConsumer:
             surface_2_sorted_spots[length] = {}
             for anchor, entity_counts in anchor_map.items():
                 tokenized_anchor = " ".join(nltk.word_tokenize(anchor))
-                sorted_entity_counts = sorted(entity_counts.items(), key=itemgetter(1), reverse=True)
-                surface_2_sorted_spots[length][tokenized_anchor] = sorted_entity_counts
+                sorted_entity_counts = sorted(entity_counts.items(),
+                                              key=itemgetter(1), reverse=True)
+                surface_2_sorted_spots[length][
+                    tokenized_anchor] = sorted_entity_counts
 
         # Find out the title's entity.
         title_entity = format_wiki_title(title)
@@ -325,7 +345,8 @@ class WikiSpotConsumer:
             surface_2_sorted_spots[title_length][tokenized_title] = []
 
         surface_form_lengths.add(title_length)
-        surface_2_sorted_spots[title_length][tokenized_title].insert(0, ((title_entity, title_fb_id), 0))
+        surface_2_sorted_spots[title_length][tokenized_title].insert(0, (
+        (title_entity, title_fb_id), 0))
 
         offset = 0
         link_index = 0
@@ -341,7 +362,8 @@ class WikiSpotConsumer:
                 anchor_length = len(actual_anchor_tokens)
                 end = begin + anchor_length
 
-                spot = {'loc': [begin + offset, end + offset], 'surface': " ".join(actual_anchor_tokens),
+                spot = {'loc': [begin + offset, end + offset],
+                        'surface': " ".join(actual_anchor_tokens),
                         'entities': [{'wiki': wiki_name, 'id': fb_id}]}
                 all_spots.append(spot)
 
@@ -371,7 +393,8 @@ class WikiSpotConsumer:
                             if not pref == 0:
                                 # If we found it in the anchor memory, then use it to annotate the current one.
                                 if window_text in anchor_memory:
-                                    previous_wiki_name, previous_fb_id, happen_index = anchor_memory[window_text]
+                                    previous_wiki_name, previous_fb_id, happen_index = \
+                                    anchor_memory[window_text]
                                     if begin - happen_index <= 50:
                                         # If something is found in the anchor memory, we use that as the annotation.
                                         wiki_name = previous_wiki_name
@@ -380,8 +403,10 @@ class WikiSpotConsumer:
                                         # If it is expired, remove it.
                                         anchor_memory.pop(window_text, None)
 
-                            spot = {'loc': [begin + offset, end + offset], 'surface': window_text,
-                                    'entities': [{'wiki': wiki_name, 'id': fb_id if fb_id else "None"}]}
+                            spot = {'loc': [begin + offset, end + offset],
+                                    'surface': window_text,
+                                    'entities': [{'wiki': wiki_name,
+                                                  'id': fb_id if fb_id else "None"}]}
                             all_spots.append(spot)
 
         return all_spots
@@ -391,7 +416,8 @@ class WikiSpotConsumer:
         self.output.close()
 
 
-def parse_dump_producer(dump_file, output_path, consumer, redirects={}, wiki_2_fb={}, link_prob=False, num_cpu=5):
+def parse_dump_producer(dump_file, output_path, consumer, redirects={},
+                        wiki_2_fb={}, link_prob=False, num_cpu=5):
     logging.info("Starting dump parsing.")
     print("Start parsing the dump.")
 
@@ -407,12 +433,14 @@ def parse_dump_producer(dump_file, output_path, consumer, redirects={}, wiki_2_f
     # The consumer will start looping and wait for items.
     consumer.prepare_consumer(q)
 
-    for wiki_id, title, redirect, revision_id, wiki_links, text in page_parser.parse(dump, True):
+    for wiki_id, title, redirect, revision_id, wiki_links, text in page_parser.parse(
+            dump, True):
         if redirect:
             # Ignoring redirect pages.
             continue
 
-        title_wiki_name, title_fb_id = get_name_and_id(title, redirects, wiki_2_fb)
+        title_wiki_name, title_fb_id = get_name_and_id(title, redirects,
+                                                       wiki_2_fb)
         links = process_links(wiki_links, wiki_2_fb, redirects)
 
         for anchor, wiki_title, fb_id, span in links:
@@ -421,7 +449,8 @@ def parse_dump_producer(dump_file, output_path, consumer, redirects={}, wiki_2_f
             else:
                 failed_pages.add(wiki_title)
 
-        element = (wiki_id, title, title_fb_id, redirect, revision_id, links, text)
+        element = (
+        wiki_id, title, title_fb_id, redirect, revision_id, links, text)
         q.put(element)
 
         if link_prob:
@@ -433,15 +462,18 @@ def parse_dump_producer(dump_file, output_path, consumer, redirects={}, wiki_2_f
     consumer.close()
 
     # Logging additional debug information.
-    out_wiki_not_found = open(os.path.join(output_path, "wiki_not_found.txt"), encoding='UTF-8', mode='w')
-    out_wiki_not_found.write("%d links found, %d links missed.\n" % (len(found_pages), len(failed_pages)))
+    out_wiki_not_found = open(os.path.join(output_path, "wiki_not_found.txt"),
+                              encoding='UTF-8', mode='w')
+    out_wiki_not_found.write("%d links found, %d links missed.\n" % (
+    len(found_pages), len(failed_pages)))
     out_wiki_not_found.write("================================\n")
     for p in failed_pages:
         out_wiki_not_found.write(p)
         out_wiki_not_found.write("\n")
     out_wiki_not_found.close()
 
-    print("%d links found, %d links missed." % (len(found_pages), len(failed_pages)))
+    print("%d links found, %d links missed." % (
+    len(found_pages), len(failed_pages)))
 
     if link_prob:
         write_as_json(sl, os.path.join(output_path, "prob.json"))
@@ -506,11 +538,14 @@ def write_cleaned_text(id, revid, title, text, out):
     Extractor(id, revid, title, text.split("\n")).extract(out)
 
 
-def clean_wiki_text(links, pageid, revid, title, text, out, use_plain_text=False, use_link=False):
+def clean_wiki_text(links, pageid, revid, title, text, out,
+                    use_plain_text=False, use_link=False):
     if use_plain_text:
-        write_cleaned_text(pageid, revid, title, format_anchor(links, text), out)
+        write_cleaned_text(pageid, revid, title, format_anchor(links, text),
+                           out)
     if use_link:
-        write_cleaned_text(pageid, revid, title, format_anchor(links, text, True), out)
+        write_cleaned_text(pageid, revid, title,
+                           format_anchor(links, text, True), out)
 
 
 def format_anchor(links, text, use_freebase=False):
@@ -584,25 +619,32 @@ def main():
     from linker.data import data_utils
     logging.info("Loading redirect pages.")
     print("Loading redirect pages.")
-    redirects = data_utils.run_or_load(redirect_pickle, data_utils.load_redirects, redirect_path)
+    redirects = data_utils.run_or_load(redirect_pickle,
+                                       data_utils.load_redirects, redirect_path)
     print("Done.")
     logging.info("Done")
 
-    logging.info("Loading Wikipedia to Freebase.")
-    print("Loading Wikipedia to Freebase.")
-    wiki_2_fb = read_wiki_fb_mapping(free_base_mapping)
-    print("Done.")
-    logging.info("Done")
+    if free_base_mapping is not None:
+        logging.info("Loading Wikipedia to Freebase.")
+        print("Loading Wikipedia to Freebase.")
+        wiki_2_fb = read_wiki_fb_mapping(free_base_mapping)
+        print("Done.")
+        logging.info("Done")
+    else:
+        logging.info("No Freebase mapping read.")
+        wiki_2_fb = defaultdict(lambda a: a)
 
     root = logging.getLogger()
     root.setLevel(logging.WARNING)
     root.handlers = []
     handler = logging.FileHandler(os.path.join(output_path, "dump.log"))
-    handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s %(message)s'))
+    handler.setFormatter(
+        logging.Formatter('%(asctime)s %(levelname)s %(message)s'))
     root.addHandler(handler)
 
     # consumer = WriteTextConsumer(output_path, write_text, write_anchor_text, write_both, 5)
     consumer = WikiSpotConsumer(output_path, 5)
 
-    parse_dump_producer(dump_file, output_path, consumer, link_prob=link_prob, wiki_2_fb=wiki_2_fb,
+    parse_dump_producer(dump_file, output_path, consumer, link_prob=link_prob,
+                        wiki_2_fb=wiki_2_fb,
                         redirects=redirects, num_cpu=6)
