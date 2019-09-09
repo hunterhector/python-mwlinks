@@ -20,7 +20,10 @@ setuptools.setup(
     platforms='any',
 
     install_requires=[
-        'docopt'
+        'mwxml',
+        'mwtypes',
+        'docopt',
+        'jsonable',
     ],
     extras_require={
     },
